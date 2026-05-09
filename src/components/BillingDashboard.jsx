@@ -553,7 +553,9 @@ function WorkReceipt({ ws, threeM, washing, alignment, users, teams }) {
 
 // ─── Bill Modal ───────────────────────────────────────────────────────────────
 function BillModal({ vehicle, currentUser, onClose, onSuccess }) {
-  const [amount, setAmount] = useState("");
+  const [amount, setAmount] = useState(
+    vehicle.bill_amount ? String(vehicle.bill_amount) : "",
+  );
   const [notes, setNotes] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -567,10 +569,14 @@ function BillModal({ vehicle, currentUser, onClose, onSuccess }) {
     setLoading(true);
     setError("");
     try {
+      // Only move to payment stage if vehicle is already in billing stage
+      const nextStage =
+        vehicle.current_stage === "billing" ? "payment" : vehicle.current_stage;
+
       const { error: ve } = await supabase
         .from("vehicles")
         .update({
-          current_stage: "payment",
+          current_stage: nextStage,
           current_status: "pending",
           bill_amount: total,
           bill_generated_at: new Date().toISOString(),
@@ -586,7 +592,7 @@ function BillModal({ vehicle, currentUser, onClose, onSuccess }) {
           user_id: currentUser?.id || null,
           stage: "billing",
           action: "bill_generated",
-          new_value: `Bill Amount: ₹${total.toLocaleString("en-IN")}`,
+          new_value: `Bill Amount: ₹${total.toLocaleString("en-IN")}${vehicle.current_stage === "billing" ? " — moved to payment" : " — bill saved, stage unchanged"}`,
           notes: notes || null,
         },
       ]);
@@ -1005,13 +1011,33 @@ function VehicleDetailModal({
               </div>
             </div>
           </div>
-          <Btn
-            variant="success"
-            onClick={() => setShowBill(true)}
-            style={{ fontSize: 15, padding: "11px 28px" }}
-          >
-            💰 Generate Bill
-          </Btn>
+          {!vehicle.bill_amount || parseFloat(vehicle.bill_amount) <= 0 ? (
+            <Btn
+              variant="success"
+              onClick={() => setShowBill(true)}
+              style={{ fontSize: 15, padding: "11px 28px" }}
+            >
+              💰 Generate Bill
+            </Btn>
+          ) : vehicle.payment_status === "pending" ||
+            vehicle.payment_status === "unpaid" ||
+            !vehicle.payment_status ? (
+            <Btn
+              variant="primary"
+              onClick={() => setShowBill(true)}
+              style={{ fontSize: 15, padding: "11px 28px" }}
+            >
+              ✏️ Edit Bill — {fmtINR(vehicle.bill_amount)}
+            </Btn>
+          ) : (
+            <Btn
+              variant="secondary"
+              disabled={true}
+              style={{ fontSize: 15, padding: "11px 28px" }}
+            >
+              🔒 Bill Locked — {fmtINR(vehicle.bill_amount)}
+            </Btn>
+          )}
         </div>
 
         {/* Scrollable body — two columns */}
@@ -1537,9 +1563,21 @@ function VehicleListCard({ vehicle, onViewDetails, onGenerateBill }) {
           <Btn variant="secondary" onClick={onViewDetails}>
             📄 View Details
           </Btn>
-          <Btn variant="success" onClick={onGenerateBill}>
-            💰 Generate Bill
-          </Btn>
+          {!vehicle.bill_amount || parseFloat(vehicle.bill_amount) <= 0 ? (
+            <Btn variant="success" onClick={onGenerateBill}>
+              💰 Generate Bill
+            </Btn>
+          ) : vehicle.payment_status === "pending" ||
+            vehicle.payment_status === "unpaid" ||
+            !vehicle.payment_status ? (
+            <Btn variant="primary" onClick={onGenerateBill}>
+              ✏️ Edit Bill
+            </Btn>
+          ) : (
+            <Btn variant="secondary" disabled={true}>
+              🔒 Bill Locked
+            </Btn>
+          )}
         </div>
       </div>
     </div>
@@ -1547,13 +1585,12 @@ function VehicleListCard({ vehicle, onViewDetails, onGenerateBill }) {
 }
 
 // ─── Pipeline Section ─────────────────────────────────────────────────────────
-function PipelineSection({ pdi, dueToday }) {
-  const [pdiOpen, setPdiOpen] = useState(true);
+function PipelineSection({ waitingPayment, dueToday, onEditBill }) {
+  const [waitingOpen, setWaitingOpen] = useState(true);
   const [dueTodayOpen, setDueTodayOpen] = useState(true);
   const now = new Date();
 
-  if (pdi.length === 0 && dueToday.length === 0) return null;
-
+  if (waitingPayment.length === 0 && dueToday.length === 0) return null;
   const PipelineCard = ({ vehicle, type }) => {
     const ws = vehicle.work_stages?.[0];
     const isOverdue =
@@ -1583,7 +1620,7 @@ function PipelineSection({ pdi, dueToday }) {
           background: C.surface,
           border: `1px solid ${C.border}`,
           borderRadius: 8,
-          borderLeft: `3px solid ${type === "pdi" ? C.purple : isOverdue ? C.red : C.cyan}`,
+          borderLeft: `3px solid ${type === "waitingPayment" ? C.cyan : isOverdue ? C.red : C.border}`,
         }}
       >
         <div style={{ flex: 1, minWidth: 0 }}>
@@ -1619,9 +1656,9 @@ function PipelineSection({ pdi, dueToday }) {
                 {vehicle.priority.toUpperCase()}
               </Chip>
             )}
-            {type === "pdi" && (
-              <Chip color={C.purple} bg={C.purpleLight}>
-                ✅ In PDI
+            {type === "waitingPayment" && (
+              <Chip color={C.cyan} bg={C.cyanLight}>
+                💳 Bill Generated
               </Chip>
             )}
             {isOverdue && (
@@ -1649,6 +1686,14 @@ function PipelineSection({ pdi, dueToday }) {
               </span>
             )}
           </div>
+          {/* Waiting for payment: show bill amount */}
+          {type === "waitingPayment" && vehicle.bill_amount && (
+            <div style={{ marginTop: 6 }}>
+              <Chip color={C.green} bg={C.greenLight}>
+                💰 {fmtINR(vehicle.bill_amount)}
+              </Chip>
+            </div>
+          )}
           {/* For due-today: show pending depts (what's left) and done depts */}
           {type === "dueToday" && ws && (
             <div
@@ -1690,7 +1735,7 @@ function PipelineSection({ pdi, dueToday }) {
             </div>
           )}
         </div>
-        {/* Stage badge */}
+        {/* Stage badge + Edit Bill */}
         <div
           style={{
             flexShrink: 0,
@@ -1699,6 +1744,10 @@ function PipelineSection({ pdi, dueToday }) {
             color: C.textMuted,
             fontWeight: 600,
             textAlign: "right",
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "flex-end",
+            gap: 6,
           }}
         >
           {type === "dueToday" && (
@@ -1711,6 +1760,15 @@ function PipelineSection({ pdi, dueToday }) {
           <div style={{ fontSize: 10, color: C.textMuted, marginTop: 3 }}>
             Entry: {formatISTShort(vehicle.entry_time)}
           </div>
+          {type === "waitingPayment" && onEditBill && (
+            <Btn
+              variant="primary"
+              onClick={() => onEditBill(vehicle)}
+              style={{ fontSize: 12, padding: "6px 14px" }}
+            >
+              ✏️ Edit Bill
+            </Btn>
+          )}
         </div>
       </div>
     );
@@ -1718,8 +1776,8 @@ function PipelineSection({ pdi, dueToday }) {
 
   return (
     <div style={{ display: "grid", gap: 16 }}>
-      {/* Section 1: In PDI */}
-      {pdi.length > 0 && (
+      {/* Section 1: Waiting for Payment */}
+      {waitingPayment.length > 0 && (
         <div
           style={{
             background: C.surface,
@@ -1730,45 +1788,43 @@ function PipelineSection({ pdi, dueToday }) {
           }}
         >
           <div
-            onClick={() => setPdiOpen(!pdiOpen)}
+            onClick={() => setWaitingOpen(!waitingOpen)}
             style={{
               display: "flex",
               justifyContent: "space-between",
               alignItems: "center",
               padding: "13px 18px",
               cursor: "pointer",
-              background: C.purpleLight,
-              borderBottom: pdiOpen ? `1px solid ${C.border}` : "none",
+              background: C.cyanLight,
+              borderBottom: waitingOpen ? `1px solid ${C.border}` : "none",
             }}
-            onMouseEnter={(e) => (e.currentTarget.style.background = "#ede9fe")}
+            onMouseEnter={(e) => (e.currentTarget.style.background = "#cffafe")}
             onMouseLeave={(e) =>
-              (e.currentTarget.style.background = C.purpleLight)
+              (e.currentTarget.style.background = C.cyanLight)
             }
           >
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <span style={{ fontSize: 16 }}>✅</span>
+              <span style={{ fontSize: 16 }}>💳</span>
               <div>
-                <span
-                  style={{ fontWeight: 800, fontSize: 13, color: C.purple }}
-                >
-                  In PDI Right Now
+                <span style={{ fontWeight: 800, fontSize: 13, color: C.cyan }}>
+                  Waiting for Payment
                 </span>
                 <span
                   style={{
                     fontSize: 11,
-                    color: C.purple,
+                    color: C.cyan,
                     marginLeft: 8,
                     opacity: 0.8,
                   }}
                 >
-                  — advisor inspecting, billing next
+                  — bill generated, cashier to collect
                 </span>
               </div>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
               <span
                 style={{
-                  background: C.purple,
+                  background: C.cyan,
                   color: "#fff",
                   borderRadius: 12,
                   padding: "2px 10px",
@@ -1776,17 +1832,17 @@ function PipelineSection({ pdi, dueToday }) {
                   fontWeight: 800,
                 }}
               >
-                {pdi.length}
+                {waitingPayment.length}
               </span>
-              <span style={{ color: C.purple, fontSize: 14 }}>
-                {pdiOpen ? "▲" : "▼"}
+              <span style={{ color: C.cyan, fontSize: 14 }}>
+                {waitingOpen ? "▲" : "▼"}
               </span>
             </div>
           </div>
-          {pdiOpen && (
+          {waitingOpen && (
             <div style={{ padding: "12px 14px", display: "grid", gap: 8 }}>
-              {pdi.map((v) => (
-                <PipelineCard key={v.id} vehicle={v} type="pdi" />
+              {waitingPayment.map((v) => (
+                <PipelineCard key={v.id} vehicle={v} type="waitingPayment" />
               ))}
             </div>
           )}
@@ -1882,7 +1938,10 @@ function PipelineSection({ pdi, dueToday }) {
 // ─── Main Dashboard ───────────────────────────────────────────────────────────
 function BillingDashboard({ user, onLogout }) {
   const [vehicles, setVehicles] = useState([]);
-  const [pipeline, setPipeline] = useState({ pdi: [], dueToday: [] }); // new
+  const [pipeline, setPipeline] = useState({
+    waitingPayment: [],
+    dueToday: [],
+  });
   const [extraData, setExtraData] = useState({});
   const [users, setUsers] = useState([]);
   const [teams, setTeams] = useState([]);
@@ -1904,33 +1963,27 @@ function BillingDashboard({ user, onLogout }) {
         istTodayEnd.getTime() - istOff,
       ).toISOString();
 
-      const [vRes, pdiRes, dtRes, usRes, trRes] = await Promise.all([
+      const [vRes, pdiRes, usRes, trRes] = await Promise.all([
         // Current billing queue
         supabase
           .from("vehicles")
           .select(
             "*, work_stages(*), customer_complaints(*), advisor:users!vehicles_advisor_id_fkey(full_name)",
           )
-          .eq("current_stage", "billing")
+          .in("current_stage", ["advisor_review", "pending", "pdi", "billing"])
+          .or("bill_amount.is.null,bill_amount.eq.0")
           .order("entry_time", { ascending: true }),
         // In PDI right now — minutes away from billing
         supabase
           .from("vehicles")
           .select(
-            "id,vehicle_number,customer_name,customer_phone,model,priority,entry_time,expected_completion_time,work_stages(*),advisor:users!vehicles_advisor_id_fkey(full_name)",
+            "id,vehicle_number,customer_name,customer_phone,model,priority,entry_time,expected_completion_time,bill_amount,payment_status,current_stage,advisor:users!vehicles_advisor_id_fkey(full_name)",
           )
-          .eq("current_stage", "pdi")
+          .not("bill_amount", "is", null)
+          .gt("bill_amount", 0)
+          .not("current_stage", "in", '("ready_for_exit","completed")')
+          .not("payment_status", "in", '("paid","credit")')
           .order("entry_time", { ascending: true }),
-        // Due today — still pending/in workshop but expected_completion_time is today
-        supabase
-          .from("vehicles")
-          .select(
-            "id,vehicle_number,customer_name,customer_phone,model,priority,entry_time,expected_completion_time,current_stage,work_stages(*),advisor:users!vehicles_advisor_id_fkey(full_name)",
-          )
-          .in("current_stage", ["pending", "front_checkup", "advisor_review"])
-          .gte("expected_completion_time", todayStartUTC)
-          .lte("expected_completion_time", todayEndUTC)
-          .order("expected_completion_time", { ascending: true }),
         supabase
           .from("users")
           .select("id,full_name,role,team_id")
@@ -1940,7 +1993,7 @@ function BillingDashboard({ user, onLogout }) {
 
       const vList = vRes.data || [];
       setVehicles(vList);
-      setPipeline({ pdi: pdiRes.data || [], dueToday: dtRes.data || [] });
+      setPipeline({ waitingPayment: pdiRes.data || [], dueToday: [] });
       setUsers(usRes.data || []);
       setTeams(trRes.data || []);
 
@@ -2009,8 +2062,8 @@ function BillingDashboard({ user, onLogout }) {
       v.expected_completion_time &&
       new Date() > new Date(toZ(v.expected_completion_time)),
   ).length;
-  const pipelineTotal = pipeline.pdi.length + pipeline.dueToday.length;
-
+  const pipelineTotal =
+    pipeline.waitingPayment.length + pipeline.dueToday.length;
   if (loading)
     return (
       <div
@@ -2161,7 +2214,7 @@ function BillingDashboard({ user, onLogout }) {
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: "repeat(5,1fr)",
+            gridTemplateColumns: "repeat(4,1fr)",
             gap: 12,
             marginBottom: 22,
           }}
@@ -2186,16 +2239,10 @@ function BillingDashboard({ user, onLogout }) {
               icon: "⏰",
             },
             {
-              label: "In PDI Now",
-              value: pipeline.pdi.length,
-              color: pipeline.pdi.length > 0 ? C.purple : C.textMuted,
-              icon: "✅",
-            },
-            {
-              label: "Due Today",
-              value: pipeline.dueToday.length,
-              color: pipeline.dueToday.length > 0 ? C.cyan : C.textMuted,
-              icon: "🕐",
+              label: "Waiting Payment",
+              value: pipeline.waitingPayment.length,
+              color: pipeline.waitingPayment.length > 0 ? C.cyan : C.textMuted,
+              icon: "💳",
             },
           ].map((s) => (
             <div
@@ -2242,7 +2289,6 @@ function BillingDashboard({ user, onLogout }) {
             </div>
           ))}
         </div>
-
         {/* Current billing queue */}
         <div
           style={{
@@ -2316,7 +2362,6 @@ function BillingDashboard({ user, onLogout }) {
             🔄 Refresh
           </button>
         </div>
-
         {vehicles.length === 0 ? (
           <div
             style={{
@@ -2366,9 +2411,12 @@ function BillingDashboard({ user, onLogout }) {
               ))}
           </div>
         )}
-
         {/* ── Pipeline sections ─────────────────────────────────────────────── */}
-        <PipelineSection pdi={pipeline.pdi} dueToday={pipeline.dueToday} />
+        <PipelineSection
+          waitingPayment={pipeline.waitingPayment}
+          dueToday={pipeline.dueToday}
+          onEditBill={(v) => setBillTarget(v)}
+        />{" "}
       </div>
 
       {/* Quick bill from list */}

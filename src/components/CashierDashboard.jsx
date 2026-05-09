@@ -67,7 +67,10 @@ function CashierDashboard({ user, onLogout }) {
       const { data: pending } = await supabase
         .from("vehicles")
         .select("*")
-        .eq("current_stage", "payment")
+        .not("bill_amount", "is", null)
+        .gt("bill_amount", 0)
+        .not("payment_status", "in", '("paid","credit")')
+        .not("current_stage", "in", '("ready_for_exit","completed")')
         .order("entry_time", { ascending: false });
 
       // For each pending vehicle, look up previous credit from same vehicle_number
@@ -1124,10 +1127,17 @@ function PaymentFormModal({ vehicle, onClose, onSuccess }) {
       if (payErr) throw payErr;
 
       // ── Update vehicle ──
+      // Only move to ready_for_exit if vehicle is already in payment stage
+      // If bill was generated before PDI, vehicle may still be in an earlier stage
+      const nextStage =
+        vehicle.current_stage === "payment"
+          ? "ready_for_exit"
+          : vehicle.current_stage;
+
       const { error: vErr } = await supabase
         .from("vehicles")
         .update({
-          current_stage: "ready_for_exit",
+          current_stage: nextStage,
           current_status: "pending",
           payment_status: paymentStatus,
           total_paid: totalNowPaid,
