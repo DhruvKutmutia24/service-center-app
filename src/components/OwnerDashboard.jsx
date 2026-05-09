@@ -1414,6 +1414,295 @@ async function exportToExcel(reportType, fromDate, toDate) {
       wb,
       `CreditOutstanding_${new Date().toISOString().split("T")[0]}.xlsx`,
     );
+  } else if (reportType === "force_pdi") {
+    const { data: hist } = await supabase
+      .from("vehicle_history")
+      .select(
+        "*,user:users!vehicle_history_user_id_fkey(full_name),vehicle:vehicles!vehicle_history_vehicle_id_fkey(vehicle_number,customer_name,model)",
+      )
+      .eq("action", "force_pdi")
+      .gte("created_at", f0)
+      .lte("created_at", t0)
+      .order("created_at", { ascending: false });
+
+    const { data: deptHist } = await supabase
+      .from("vehicle_history")
+      .select(
+        "*,user:users!vehicle_history_user_id_fkey(full_name),vehicle:vehicles!vehicle_history_vehicle_id_fkey(vehicle_number)",
+      )
+      .in("action", ["force_completed", "work_cancelled"])
+      .gte("created_at", f0)
+      .lte("created_at", t0)
+      .order("created_at", { ascending: true });
+
+    // Fetch vehicles and history for accountability sheets
+    const { data: veh } = await supabase
+      .from("vehicles")
+      .select("id,vehicle_number,customer_name,model,entry_time,work_stages(*)")
+      .gte("entry_time", f0)
+      .lte("entry_time", t0);
+
+    const { data: acctHist } = await supabase
+      .from("vehicle_history")
+      .select(
+        "vehicle_id,stage,action,created_at,user:users!vehicle_history_user_id_fkey(full_name)",
+      )
+      .gte("created_at", f0)
+      .lte("created_at", t0)
+      .in("action", [
+        "started",
+        "work_started",
+        "completed",
+        "work_completed",
+        "on_hold",
+        "force_completed",
+        "work_cancelled",
+      ])
+      .order("created_at", { ascending: true });
+
+    const { data: teamsData } = await supabase
+      .from("teams")
+      .select("id,name,role");
+
+    // Force PDI Summary sheet
+    sheet(
+      (hist || []).map((h) => ({
+        "Vehicle No": h.vehicle?.vehicle_number || "",
+        Customer: h.vehicle?.customer_name || "",
+        Model: h.vehicle?.model || "",
+        "Force PDI By": h.user?.full_name || "",
+        Summary: h.new_value || "",
+        "Departments Not Updated": h.notes || "",
+        Time: new Date(toZ(h.created_at)).toLocaleString("en-IN", {
+          timeZone: "Asia/Kolkata",
+        }),
+      })),
+      "Force PDI Summary",
+    );
+
+    // Dept Actions sheet
+    sheet(
+      (deptHist || []).map((h) => ({
+        "Vehicle No": h.vehicle?.vehicle_number || "",
+        Department: h.stage || "",
+        Action:
+          h.action === "force_completed" ? "Force Completed" : "Cancelled",
+        "By Advisor": h.user?.full_name || "",
+        Notes: h.notes || "",
+        Time: new Date(toZ(h.created_at)).toLocaleString("en-IN", {
+          timeZone: "Asia/Kolkata",
+        }),
+      })),
+      "Dept Actions",
+    );
+
+    // Force PDI by Team/Dept summary sheet
+    const summaryRows = [];
+
+    // Team-based depts — group by team name
+    const TEAM_DEPTS_FP = ["mechanic", "denter", "electrician", "painter"];
+    TEAM_DEPTS_FP.forEach((dept) => {
+      const deptTeams = (teamsData || []).filter((t) => t.role === dept);
+      const affectedForDept = (deptHist || []).filter((h) => h.stage === dept);
+
+      deptTeams.forEach((team) => {
+        // Get vehicles assigned to this team that had force pdi action
+        const teamVehicleNums = (veh || [])
+          .filter((v) => v.work_stages?.[0]?.[`${dept}_team_id`] === team.id)
+          .map((v) => v.vehicle_number);
+
+        const forcedVehicles = affectedForDept
+          .filter((h) => teamVehicleNums.includes(h.vehicle?.vehicle_number))
+          .map((h) => h.vehicle?.vehicle_number)
+          .filter(Boolean);
+
+        const unique = [...new Set(forcedVehicles)];
+        if (!unique.length) return;
+
+        summaryRows.push({
+          "Team / Department": team.name,
+          Role: STAGE_META[dept]?.label || dept,
+          "Vehicles with Force PDI": unique.join(", "),
+          Count: unique.length,
+        });
+      });
+    });
+
+    // Solo depts — just dept name
+    const SOLO_DEPTS_FP = ["washing", "three_m", "alignment_balancing", "tyre_fitting"];
+    SOLO_DEPTS_FP.forEach((dept) => {
+      const affectedForDept = (deptHist || []).filter((h) => h.stage === dept);
+      const unique = [...new Set(
+        affectedForDept.map((h) => h.vehicle?.vehicle_number).filter(Boolean)
+      )];
+      if (!unique.length) return;
+
+      summaryRows.push({
+        "Team / Department": STAGE_META[dept]?.label || dept,
+        Role: STAGE_META[dept]?.label || dept,
+        "Vehicles with Force PDI": unique.join(", "),
+        Count: unique.length,
+      });
+    });
+
+    if (summaryRows.length) {
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summaryRows), "Dept Force PDI Summary");
+    }
+
+    // Build history map for accountability
+    const hm = {};
+    (acctHist || []).forEach((h) => {
+      const key = `${h.vehicle_id}__${h.stage}`;
+      if (!hm[key])
+        hm[key] = {
+          s: null,
+          e: null,
+          hold: 0,
+          worker: "",
+          forceCompleted: false,
+          cancelled: false,
+        };
+      const t = new Date(toZ(h.created_at));
+      const a = h.action;
+      if ((a === "started" || a === "work_started") && !hm[key].s) {
+        hm[key].s = t;
+        hm[key].worker = h.user?.full_name || "";
+      }
+      if (a === "completed" || a === "work_completed") hm[key].e = t;
+      if (a === "on_hold") hm[key].hold++;
+      if (a === "force_completed") hm[key].forceCompleted = true;
+      if (a === "work_cancelled") hm[key].cancelled = true;
+    });
+
+    // Team-based departments
+    const TEAM_DEPTS = ["mechanic", "denter", "electrician"];
+    TEAM_DEPTS.forEach((dept) => {
+      const deptTeams = (teamsData || []).filter((t) => t.role === dept);
+      const deptVehicles = (veh || []).filter(
+        (v) => v.work_stages?.[0]?.[`${dept}_required`],
+      );
+
+      deptTeams.forEach((team) => {
+        const rows = [];
+        const teamVehicles = deptVehicles.filter(
+          (v) => v.work_stages?.[0]?.[`${dept}_team_id`] === team.id,
+        );
+        teamVehicles.forEach((v) => {
+          const ws = v.work_stages?.[0];
+          const key = `${v.id}__${dept}`;
+          const lg = hm[key] || {};
+          const dur = lg.s && lg.e ? Math.round((lg.e - lg.s) / 60000) : null;
+          const status = ws?.[`${dept}_status`] || "not_started";
+          rows.push({
+            "Vehicle No": v.vehicle_number,
+            Customer: v.customer_name || "",
+            Model: v.model || "",
+            Team: team.name,
+            Worker: lg.worker || "",
+            Status: status,
+            "Start Time": lg.s
+              ? lg.s.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })
+              : "Not started",
+            "End Time": lg.e
+              ? lg.e.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })
+              : "—",
+            "TAT (mins)": dur || "",
+            "On Hold Count": lg.hold || 0,
+            "Force Completed": lg.forceCompleted ? "YES" : "No",
+            "Work Cancelled": lg.cancelled ? "YES" : "No",
+            Missed: status !== "completed" ? "YES" : "No",
+          });
+        });
+
+        // Unassigned vehicles for this dept
+        deptVehicles
+          .filter((v) => !v.work_stages?.[0]?.[`${dept}_team_id`])
+          .forEach((v) => {
+            const ws = v.work_stages?.[0];
+            const key = `${v.id}__${dept}`;
+            const lg = hm[key] || {};
+            rows.push({
+              "Vehicle No": v.vehicle_number,
+              Customer: v.customer_name || "",
+              Model: v.model || "",
+              Team: "UNASSIGNED",
+              Worker: lg.worker || "",
+              Status: ws?.[`${dept}_status`] || "not_started",
+              "Start Time": lg.s
+                ? lg.s.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })
+                : "Not started",
+              "End Time": "—",
+              "TAT (mins)": "",
+              "On Hold Count": lg.hold || 0,
+              "Force Completed": lg.forceCompleted ? "YES" : "No",
+              "Work Cancelled": lg.cancelled ? "YES" : "No",
+              Missed: "YES",
+            });
+          });
+
+        if (rows.length) {
+          const sheetName = `${STAGE_META[dept]?.label} - ${team.name}`.slice(
+            0,
+            31,
+          );
+          XLSX.utils.book_append_sheet(
+            wb,
+            XLSX.utils.json_to_sheet(rows),
+            sheetName,
+          );
+        }
+      });
+    });
+
+    // Solo departments
+    const SOLO_DEPTS = [
+      "painter",
+      "washing",
+      "three_m",
+      "alignment_balancing",
+      "tyre_fitting",
+    ];
+    SOLO_DEPTS.forEach((dept) => {
+      const deptVehicles = (veh || []).filter(
+        (v) => v.work_stages?.[0]?.[`${dept}_required`],
+      );
+      if (!deptVehicles.length) return;
+
+      const rows = deptVehicles.map((v) => {
+        const ws = v.work_stages?.[0];
+        const key = `${v.id}__${dept}`;
+        const lg = hm[key] || {};
+        const dur = lg.s && lg.e ? Math.round((lg.e - lg.s) / 60000) : null;
+        const status = ws?.[`${dept}_status`] || "not_started";
+        return {
+          "Vehicle No": v.vehicle_number,
+          Customer: v.customer_name || "",
+          Model: v.model || "",
+          Worker: lg.worker || "",
+          Status: status,
+          "Start Time": lg.s
+            ? lg.s.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })
+            : "Not started",
+          "End Time": lg.e
+            ? lg.e.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })
+            : "—",
+          "TAT (mins)": dur || "",
+          "On Hold Count": lg.hold || 0,
+          "Force Completed": lg.forceCompleted ? "YES" : "No",
+          "Work Cancelled": lg.cancelled ? "YES" : "No",
+          Missed: status !== "completed" ? "YES" : "No",
+        };
+      });
+
+      const sheetName = STAGE_META[dept]?.label?.slice(0, 31) || dept;
+      XLSX.utils.book_append_sheet(
+        wb,
+        XLSX.utils.json_to_sheet(rows),
+        sheetName,
+      );
+    });
+
+    XLSX.writeFile(wb, `ForcePDI_${fromDate}_to_${toDate}.xlsx`);
   }
 }
 
@@ -1575,10 +1864,18 @@ function OverviewTab({
           icon="📋"
           color={totalOutstandingCredit > 0 ? T.amber : T.green}
           onClick={() =>
-            creditVehicles.length > 0 &&
+            derived.creditGroups.length > 0 &&
             onQuickView(
-              "📋 Credit Outstanding — " + creditVehicles.length + " vehicles",
-              creditVehicles,
+              "📋 Credit Outstanding — " +
+                derived.creditGroups.length +
+                " vehicles",
+              derived.creditGroups
+                .map((g) => ({
+                  ...g.visits[0],
+                  priority: g.visits[0]?.priority ?? "normal",
+                  work_stages: [],
+                }))
+                .filter(Boolean),
             )
           }
         />
@@ -3545,6 +3842,12 @@ function ReportsTab({
       label: "📋 Credit Outstanding",
       desc: "Always exports current full balance",
       usesDateRange: false,
+    },
+    {
+      type: "force_pdi",
+      label: "⚡ Force PDI Report",
+      desc: "All force PDI actions with dept details",
+      usesDateRange: true,
     },
   ];
 
