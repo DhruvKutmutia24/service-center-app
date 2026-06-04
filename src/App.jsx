@@ -4,6 +4,8 @@ import OwnerDashboard from "./components/OwnerDashboard";
 import AdvisorDashboard from "./components/AdvisorDashboard";
 import BillingDashboard from "./components/BillingDashboard";
 import CashierDashboard from "./components/CashierDashboard";
+import BookingPage from "./components/BookingPage";
+import ReceptionistDashboard from "./components/ReceptionistDashboard";
 
 function App() {
   const [user, setUser] = useState(() => {
@@ -11,45 +13,35 @@ function App() {
     return saved ? JSON.parse(saved) : null;
   });
 
-  const handleLogin = (userData) => {
-    setUser(userData);
-  };
-
-  const handleLogout = () => {
-    setUser(null);
-  };
+  const handleLogin = (userData) => setUser(userData);
+  const handleLogout = () => setUser(null);
 
   useEffect(() => {
-    if (user) {
-      localStorage.setItem("user", JSON.stringify(user));
-    } else {
-      localStorage.removeItem("user");
-    }
+    if (user) localStorage.setItem("user", JSON.stringify(user));
+    else localStorage.removeItem("user");
   }, [user]);
 
-  // If not logged in, show login screen
-  if (!user) {
-    return <Login onLogin={handleLogin} />;
+  // ─── Public routes (no login required) ───────────────────────────────────
+  if (window.location.pathname === "/book") {
+    return <BookingPage />;
   }
 
-  // After login, show role-specific dashboard
-  if (user.role === "owner") {
+  // ─── Auth gate ────────────────────────────────────────────────────────────
+  if (!user) return <Login onLogin={handleLogin} />;
+
+  // ─── Role-based dashboards ────────────────────────────────────────────────
+  if (user.role === "owner")
     return <OwnerDashboard user={user} onLogout={handleLogout} />;
-  }
-
-  if (user.role === "advisor") {
+  if (user.role === "advisor")
     return <AdvisorDashboard user={user} onLogout={handleLogout} />;
-  }
-
-  if (user.role === "billing") {
+  if (user.role === "billing")
     return <BillingDashboard user={user} onLogout={handleLogout} />;
-  }
-
-  if (user.role === "cashier") {
+  if (user.role === "cashier")
     return <CashierDashboard user={user} onLogout={handleLogout} />;
-  }
+  if (user.role === "receptionist")
+    return <ReceptionistDashboard user={user} onLogout={handleLogout} />;
 
-  // For other roles (we'll build these later)
+  // ─── Fallback ─────────────────────────────────────────────────────────────
   return (
     <div style={{ padding: "40px", fontFamily: "Arial" }}>
       <h2>Welcome, {user.full_name}!</h2>

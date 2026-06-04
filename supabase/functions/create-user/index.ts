@@ -221,7 +221,6 @@ serve(async (req) => {
       if (phone) updateData.phone = phone;
       if (email !== undefined) updateData.email = email || null;
       if (role) updateData.role = role;
-      if (password) updateData.password_hash = password;
 
       const { data: updatedUser, error: updateError } = await supabaseAdmin
         .from("users")
