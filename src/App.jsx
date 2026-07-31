@@ -6,6 +6,7 @@ import BillingDashboard from "./components/BillingDashboard";
 import CashierDashboard from "./components/CashierDashboard";
 import BookingPage from "./components/BookingPage";
 import ReceptionistDashboard from "./components/ReceptionistDashboard";
+import SpareDashboard from "./components/SpareDashboard";
 
 function App() {
   const [user, setUser] = useState(() => {
@@ -22,9 +23,12 @@ function App() {
   }, [user]);
 
   // ─── Public routes (no login required) ───────────────────────────────────
-  if (window.location.pathname === "/book") {
+  if (
+    window.location.pathname === "/book" ||
+    window.location.hostname === "booking.keeltech.in" ||
+    window.location.hostname === "booking.sheetalauto.com"
+  )
     return <BookingPage />;
-  }
 
   // ─── Auth gate ────────────────────────────────────────────────────────────
   if (!user) return <Login onLogin={handleLogin} />;
@@ -40,6 +44,8 @@ function App() {
     return <CashierDashboard user={user} onLogout={handleLogout} />;
   if (user.role === "receptionist")
     return <ReceptionistDashboard user={user} onLogout={handleLogout} />;
+  if (user.role === "spare_part_manager")
+    return <SpareDashboard user={user} onLogout={handleLogout} />;
 
   // ─── Fallback ─────────────────────────────────────────────────────────────
   return (

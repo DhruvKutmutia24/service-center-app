@@ -1,11 +1,5 @@
-import { useState, useRef, useCallback } from "react";
-import { createClient } from "@supabase/supabase-js";
-
-// ─── Supabase ─────────────────────────────────────────────────────────────────
-const supabase = createClient(
-  "https://axvjeolvntehhphhrxtt.supabase.co",
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImF4dmplb2x2bnRlaGhwaGhyeHR0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjcxNTE4NTgsImV4cCI6MjA4MjcyNzg1OH0.vXXhEV7I8UeHio8I5kPumYPDX25ZImQPztgAc8BgEVY",
-);
+import { useState, useEffect, useRef } from "react";
+import { supabase } from "../lib/supabase";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const TATA_MODELS = [
@@ -42,24 +36,14 @@ const SERVICE_TYPES = [
 const TIME_SLOTS = [
   { value: "", label: "No preference", display: "Any time" },
   {
-    value: "09:00-11:00",
-    label: "Morning  — 9:00 to 11:00 AM",
-    display: "9:00 – 11:00 AM",
+    value: "09:30-11:00",
+    label: "Morning  — 9:30 to 11:00 AM",
+    display: "9:30 – 11:00 AM",
   },
   {
     value: "11:00-13:00",
     label: "Mid-Day  — 11:00 AM to 1:00 PM",
     display: "11:00 AM – 1:00 PM",
-  },
-  {
-    value: "14:00-16:00",
-    label: "Afternoon — 2:00 to 4:00 PM",
-    display: "2:00 – 4:00 PM",
-  },
-  {
-    value: "16:00-18:00",
-    label: "Evening  — 4:00 to 6:00 PM",
-    display: "4:00 – 6:00 PM",
   },
 ];
 
@@ -68,6 +52,14 @@ const RECEPTION_PHONE = "+91 90113 75450";
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 const todayIST = () =>
   new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+
+const tomorrowIST = () => {
+  const d = new Date(
+    new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }),
+  );
+  d.setDate(d.getDate() + 1);
+  return d.toLocaleDateString("en-CA");
+};
 
 const nowIST = () =>
   new Date().toLocaleString("en-IN", {
@@ -85,7 +77,6 @@ const formatVN = (v) =>
     .toUpperCase()
     .replace(/[^A-Z0-9]/g, "")
     .slice(0, 10);
-
 const isValidPhone = (p) => /^\d{10}$/.test(p.trim());
 
 const fmtDate = (d) => {
@@ -112,11 +103,17 @@ const genRef = () => {
   const d = new Date()
     .toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" })
     .replace(/-/g, "");
-  const n = Math.floor(Math.random() * 9000 + 1000);
-  return `BK-${d}-${n}`;
+  return `BK-${d}-${Math.floor(Math.random() * 9000 + 1000)}`;
 };
 
-// ─── WhatsApp notification ────────────────────────────────────────────────────
+const dayOfWeek = (s) => {
+  if (!s) return -1;
+  const [y, m, d] = s.split("-").map(Number);
+  return new Date(y, m - 1, d).getDay();
+};
+const isSaturday = (s) => dayOfWeek(s) === 6;
+
+// ─── WhatsApp ─────────────────────────────────────────────────────────────────
 const sendBookingReceivedWA = async (
   phone,
   name,
@@ -160,13 +157,16 @@ const C = {
   greenBd: "#86efac",
   red: "#ef4444",
   redLt: "#fef2f2",
+  blue: "#2563eb",
+  blueLt: "#eff6ff",
+  blueBd: "#bfdbfe",
 };
 
 const S = {
   page: {
     minHeight: "100vh",
-    background: `linear-gradient(160deg, ${C.bg} 0%, #1e293b 55%, #1e3a5f 100%)`,
-    fontFamily: "'DM Sans', 'Segoe UI', sans-serif",
+    background: `linear-gradient(160deg,${C.bg} 0%,#1e293b 55%,#1e3a5f 100%)`,
+    fontFamily: "'DM Sans','Segoe UI',sans-serif",
     padding: "0 0 60px",
   },
   header: {
@@ -197,7 +197,6 @@ const S = {
     margin: "12px 0 0",
     letterSpacing: "0.3px",
   },
-
   card: {
     background: C.surface,
     borderRadius: 14,
@@ -225,7 +224,6 @@ const S = {
   },
   required: { color: C.red },
   optional: { color: C.muted, fontWeight: 500, fontSize: 11 },
-
   input: {
     width: "100%",
     padding: "12px 14px",
@@ -246,34 +244,10 @@ const S = {
   inputPrefilled: { background: C.greenLt, borderColor: C.green },
   inputError: { border: `1.5px solid ${C.red}` },
   inputMono: {
-    fontFamily: "'DM Mono', 'Courier New', monospace",
+    fontFamily: "'DM Mono','Courier New',monospace",
     letterSpacing: "1px",
     textTransform: "uppercase",
   },
-
-  vnRow: { position: "relative" },
-  vnIcon: {
-    position: "absolute",
-    right: 12,
-    top: "50%",
-    transform: "translateY(-50%)",
-    fontSize: 18,
-  },
-
-  banner: {
-    background: C.greenLt,
-    border: `1px solid ${C.greenBd}`,
-    borderRadius: 8,
-    padding: "10px 14px",
-    marginBottom: 12,
-    display: "flex",
-    alignItems: "center",
-    gap: 8,
-    fontSize: 13,
-    color: "#166534",
-    fontWeight: 600,
-  },
-
   select: {
     width: "100%",
     padding: "12px 14px",
@@ -286,12 +260,13 @@ const S = {
     fontFamily: "inherit",
     cursor: "pointer",
     appearance: "none",
+    WebkitAppearance: "none",
     backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E")`,
     backgroundRepeat: "no-repeat",
     backgroundPosition: "right 12px center",
     paddingRight: 40,
+    boxSizing: "border-box",
   },
-
   textarea: {
     width: "100%",
     padding: "12px 14px",
@@ -306,7 +281,6 @@ const S = {
     minHeight: 80,
     boxSizing: "border-box",
   },
-
   inputGroup: {
     display: "flex",
     alignItems: "stretch",
@@ -334,10 +308,8 @@ const S = {
     color: C.text,
     background: "transparent",
     fontFamily: "inherit",
+    minWidth: 0,
   },
-
-  row2: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 },
-
   btn: {
     width: "100%",
     padding: "15px",
@@ -352,10 +324,22 @@ const S = {
     letterSpacing: "0.3px",
   },
   btnDisabled: { background: "#cbd5e1", cursor: "not-allowed" },
-
   err: { color: "#dc2626", fontSize: 12, marginTop: 5 },
   hint: { color: C.muted, fontSize: 11, marginTop: 4, lineHeight: 1.5 },
-
+  warnBox: {
+    background: C.amberLt,
+    border: `1px solid ${C.amberBd}`,
+    borderRadius: 8,
+    padding: "9px 13px",
+    marginTop: 6,
+    fontSize: 12,
+    color: "#92400e",
+    fontWeight: 600,
+    lineHeight: 1.5,
+    display: "flex",
+    alignItems: "flex-start",
+    gap: 6,
+  },
   // Confirmation
   confCard: {
     background: C.surface,
@@ -376,7 +360,7 @@ const S = {
     background: "#f1f5f9",
     borderRadius: 8,
     padding: "12px 16px",
-    fontFamily: "'DM Mono', monospace",
+    fontFamily: "'DM Mono',monospace",
     fontSize: 16,
     fontWeight: 700,
     color: C.text,
@@ -415,7 +399,66 @@ const S = {
   },
 };
 
-// ─── Field wrapper ────────────────────────────────────────────────────────────
+// ─── useIsMobile ──────────────────────────────────────────────────────────────
+function useIsMobile(bp = 480) {
+  const [v, setV] = useState(
+    typeof window !== "undefined" ? window.innerWidth <= bp : false,
+  );
+  useEffect(() => {
+    const h = () => setV(window.innerWidth <= bp);
+    window.addEventListener("resize", h);
+    return () => window.removeEventListener("resize", h);
+  }, [bp]);
+  return v;
+}
+
+// ─── Toggle ───────────────────────────────────────────────────────────────────
+function Toggle({ value, onChange, label }) {
+  return (
+    <div
+      onClick={() => onChange(!value)}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        cursor: "pointer",
+        userSelect: "none",
+        marginBottom: 4,
+      }}
+    >
+      <div
+        style={{
+          width: 44,
+          height: 24,
+          borderRadius: 12,
+          position: "relative",
+          background: value ? C.amber : "#cbd5e1",
+          transition: "background 0.2s",
+          flexShrink: 0,
+        }}
+      >
+        <div
+          style={{
+            position: "absolute",
+            top: 3,
+            left: value ? 23 : 3,
+            width: 18,
+            height: 18,
+            borderRadius: "50%",
+            background: "#fff",
+            boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
+            transition: "left 0.2s",
+          }}
+        />
+      </div>
+      <span style={{ fontSize: 14, fontWeight: 600, color: C.text }}>
+        {label}
+      </span>
+    </div>
+  );
+}
+
+// ─── Field ────────────────────────────────────────────────────────────────────
 function Field({ label, required, optional, error, hint, children }) {
   return (
     <div style={{ marginBottom: 16 }}>
@@ -425,89 +468,133 @@ function Field({ label, required, optional, error, hint, children }) {
         {optional && <span style={S.optional}> (optional)</span>}
       </label>
       {children}
-      {hint && !error && <div style={S.hint}>{hint}</div>}
+      {hint && !error && (
+        <div
+          style={{
+            ...S.hint,
+            ...(typeof hint === "string" && hint.startsWith("✓")
+              ? { color: C.green, fontWeight: 600 }
+              : {}),
+          }}
+        >
+          {hint}
+        </div>
+      )}
       {error && <div style={S.err}>⚠ {error}</div>}
     </div>
   );
 }
 
-// ─── Main ─────────────────────────────────────────────────────────────────────
+// ─── BookingPage ──────────────────────────────────────────────────────────────
 export default function BookingPage() {
+  const isMobile = useIsMobile();
+  const row2 = isMobile
+    ? { display: "flex", flexDirection: "column", gap: 0 }
+    : { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 };
+
+  // ── Form state ─────────────────────────────────────────────────────────────
   const [form, setForm] = useState({
     vehicle_number: "",
-    customer_name: "",
-    customer_phone: "",
+    // Vehicle owner's details (always sent to WhatsApp)
+    owner_name: "",
+    owner_phone: "",
     model: "",
+    // Person filling the form (only captured when NOT the owner)
+    filler_name: "",
+    filler_phone: "",
+    // Referral — who at Sheetal referred this customer
+    referral_person: "",
+    // Service
     service_type: "",
     issue_description: "",
     preferred_date: "",
     preferred_time: "",
     odometer_reading: "",
-    contact_person: "",
   });
+
+  const [isOwner, setIsOwner] = useState(true); // "Are you the vehicle owner?"
   const [errors, setErrors] = useState({});
   const [focus, setFocus] = useState(null);
-  const [vnStatus, setVnStatus] = useState(null);
-  const [prefilled, setPrefilled] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [confirmed, setConfirmed] = useState(null);
+  const [dateWarning, setDateWarning] = useState(null);
+  const [existingBooking, setExisting] = useState(null); // duplicate detection
   const vnTimer = useRef(null);
 
-  // ── VN lookup ──────────────────────────────────────────────────────────────
-  const lookupVehicle = useCallback(async (vn) => {
-    if (vn.length < 4) {
-      setVnStatus(null);
-      return;
-    }
-    setVnStatus("looking");
+  const set = (k) => (v) => setForm((f) => ({ ...f, [k]: v }));
+
+  // ── VN + duplicate check ───────────────────────────────────────────────────
+  const checkDuplicate = async (vn) => {
     const { data } = await supabase
-      .from("vehicle_records")
-      .select("customer_name, customer_phone, model")
+      .from("bookings")
+      .select("preferred_date, ref_number, status")
       .eq("vehicle_number", vn)
+      .in("status", ["pending", "confirmed", "arrived"])
+      .order("preferred_date", { ascending: true })
+      .limit(1)
       .maybeSingle();
-    if (data) {
-      setForm((f) => ({
-        ...f,
-        customer_name: data.customer_name || f.customer_name,
-        customer_phone: data.customer_phone || f.customer_phone,
-        model: data.model || f.model,
-      }));
-      setPrefilled(true);
-      setVnStatus("found");
-    } else {
-      setPrefilled(false);
-      setVnStatus("new");
-    }
-  }, []);
+    setExisting(data || null);
+  };
 
   const handleVN = (raw) => {
     const vn = formatVN(raw);
     setForm((f) => ({ ...f, vehicle_number: vn }));
-    setPrefilled(false);
-    setVnStatus(null);
+    setExisting(null);
     clearTimeout(vnTimer.current);
     if (vn.length >= 4)
-      vnTimer.current = setTimeout(() => lookupVehicle(vn), 500);
+      vnTimer.current = setTimeout(() => checkDuplicate(vn), 600);
   };
 
-  const set = (k) => (v) => setForm((f) => ({ ...f, [k]: v }));
+  // ── Toggle: switching between owner / non-owner ────────────────────────────
+  const handleIsOwner = (val) => {
+    setIsOwner(val);
+    // When switching back to "I am the owner", clear filler fields
+    if (val) setForm((f) => ({ ...f, filler_name: "", filler_phone: "" }));
+  };
+
+  // ── Date ──────────────────────────────────────────────────────────────────
+  const handleDateChange = (val) => {
+    set("preferred_date")(val);
+    setErrors((e) => ({ ...e, preferred_date: undefined }));
+    if (!val) {
+      setDateWarning(null);
+      return;
+    }
+    if (val <= todayIST()) setDateWarning("today");
+    else if (isSaturday(val)) setDateWarning("saturday");
+    else setDateWarning(null);
+  };
 
   // ── Validation ─────────────────────────────────────────────────────────────
   const validate = () => {
     const e = {};
     if (!form.vehicle_number || form.vehicle_number.length < 4)
       e.vehicle_number = "Enter a valid vehicle number";
-    if (!form.customer_name.trim()) e.customer_name = "Name is required";
-    if (!form.customer_phone.trim())
-      e.customer_phone = "Phone number is required";
-    else if (!isValidPhone(form.customer_phone))
-      e.customer_phone = "Enter a valid 10-digit mobile number";
+
+    // Owner details — always required
+    if (!form.owner_name.trim()) e.owner_name = "Name is required";
+    if (!form.owner_phone.trim()) e.owner_phone = "Phone number is required";
+    else if (!isValidPhone(form.owner_phone))
+      e.owner_phone = "Enter a valid 10-digit mobile number";
+
+    // Filler details — only required when NOT the owner
+    if (!isOwner && !form.filler_name.trim())
+      e.filler_name = "Your name is required";
+
     if (!form.service_type) e.service_type = "Please select a service type";
-    if (!form.preferred_date) e.preferred_date = "Please pick a preferred date";
-    else if (form.preferred_date < todayIST())
-      e.preferred_date = "Date cannot be in the past";
+    if (!form.model) e.model = "Please select a vehicle model";
+
+    if (!form.preferred_date) {
+      e.preferred_date = "Please pick a preferred date";
+    } else if (form.preferred_date <= todayIST()) {
+      e.preferred_date = "Bookings open from tomorrow onwards";
+    } else if (isSaturday(form.preferred_date)) {
+      e.preferred_date = "We're closed on Saturdays — please pick another day";
+    }
+
     if (form.odometer_reading && isNaN(parseInt(form.odometer_reading)))
       e.odometer_reading = "Enter a valid number";
+
     return e;
   };
 
@@ -524,11 +611,24 @@ export default function BookingPage() {
     const ref = genRef();
     const timestamp = nowIST();
 
+    // Build contact_person string for internal use:
+    // Encodes both referral and filler info so receptionist sees everything
+    const parts = [];
+    if (form.referral_person.trim())
+      parts.push(`Ref: ${form.referral_person.trim()}`);
+    if (!isOwner && form.filler_name.trim()) {
+      const fillerStr = form.filler_phone.trim()
+        ? `${form.filler_name.trim()} (${form.filler_phone.trim()})`
+        : form.filler_name.trim();
+      parts.push(`Filled by: ${fillerStr}`);
+    }
+    const contactPerson = parts.length ? parts.join(" | ") : null;
+
     const { error } = await supabase.from("bookings").insert([
       {
         vehicle_number: form.vehicle_number,
-        customer_name: form.customer_name.trim(),
-        customer_phone: form.customer_phone.trim(),
+        customer_name: form.owner_name.trim(), // always the vehicle owner
+        customer_phone: form.owner_phone.trim(), // always the vehicle owner
         model: form.model || null,
         service_type: form.service_type,
         issue_description: form.issue_description.trim() || null,
@@ -537,7 +637,7 @@ export default function BookingPage() {
         odometer_reading: form.odometer_reading
           ? parseInt(form.odometer_reading)
           : null,
-        contact_person: form.contact_person.trim() || null,
+        contact_person: contactPerson,
         status: "pending",
         ref_number: ref,
       },
@@ -551,22 +651,20 @@ export default function BookingPage() {
       return;
     }
 
-    // WhatsApp notification
-    if (form.customer_phone) {
-      sendBookingReceivedWA(
-        form.customer_phone,
-        form.customer_name.trim(),
-        form.model,
-        form.vehicle_number,
-        form.preferred_date,
-        ref,
-      );
-    }
+    // WhatsApp always to owner
+    sendBookingReceivedWA(
+      form.owner_phone.trim(),
+      form.owner_name.trim(),
+      form.model,
+      form.vehicle_number,
+      form.preferred_date,
+      ref,
+    );
 
     setConfirmed({
       ref,
       timestamp,
-      name: form.customer_name.trim(),
+      ownerName: form.owner_name.trim(),
       vehicle: form.vehicle_number,
       model: form.model,
       date: form.preferred_date,
@@ -577,7 +675,8 @@ export default function BookingPage() {
       odometer: form.odometer_reading
         ? `${parseInt(form.odometer_reading).toLocaleString("en-IN")} km`
         : null,
-      contact: form.contact_person.trim() || null,
+      referral: form.referral_person.trim() || null,
+      fillerName: !isOwner ? form.filler_name.trim() : null,
     });
     setSubmitting(false);
   };
@@ -585,14 +684,11 @@ export default function BookingPage() {
   const inp = (key, extra = {}) => ({
     ...S.input,
     ...(focus === key ? S.inputFocus : {}),
-    ...(["customer_name", "customer_phone", "model"].includes(key) && prefilled
-      ? S.inputPrefilled
-      : {}),
     ...(errors[key] ? S.inputError : {}),
     ...extra,
   });
 
-  // ── Confirmation screen ────────────────────────────────────────────────────
+  // ── Confirmation ───────────────────────────────────────────────────────────
   if (confirmed) {
     const details = [
       ["Vehicle", confirmed.vehicle],
@@ -607,7 +703,8 @@ export default function BookingPage() {
       ],
       ["Service", confirmed.service],
       confirmed.odometer && ["Odometer", confirmed.odometer],
-      confirmed.contact && ["Referred by", confirmed.contact],
+      confirmed.referral && ["Referred by", confirmed.referral],
+      confirmed.fillerName && ["Booked by", confirmed.fillerName],
     ].filter(Boolean);
 
     return (
@@ -623,14 +720,13 @@ export default function BookingPage() {
             <div style={S.confIcon}>✅</div>
             <h2 style={S.confTitle}>Booking Request Received!</h2>
             <p style={S.confSub}>
-              Thank you, {confirmed.name.split(" ")[0]}!<br />
+              Thank you, {confirmed.ownerName.split(" ")[0]}!<br />
               Our team will call you to confirm your appointment.
             </p>
             <div style={S.confRef}>REF: {confirmed.ref}</div>
             <div style={S.confTimestamp}>
               Submitted on {confirmed.timestamp}
             </div>
-
             <div style={S.confDetail}>
               {details.map(([k, v]) => (
                 <div key={k} style={S.confRow}>
@@ -639,11 +735,10 @@ export default function BookingPage() {
                 </div>
               ))}
             </div>
-
             <div style={S.noteBox}>
               📍 <strong>Sheetal Automobiles</strong>
               <br />
-              Tata Motors Authorized Service Center, Nagpur
+              Tata Motors Authorized Service Center, Malegaon
               <br />
               <br />
               📞 <strong>{RECEPTION_PHONE}</strong>
@@ -658,22 +753,31 @@ export default function BookingPage() {
     );
   }
 
-  // ── Booking form ───────────────────────────────────────────────────────────
-  const minDate = todayIST();
+  // ── Min / max date ─────────────────────────────────────────────────────────
+  const minDate = tomorrowIST();
   const maxDate = (() => {
-    const d = new Date();
-    d.setDate(d.getDate() + 30);
-    return d.toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+    const d = new Date(
+      new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }),
+    );
+    d.setDate(d.getDate() + 31);
+    return d.toLocaleDateString("en-CA");
   })();
 
+  // ── Form render ────────────────────────────────────────────────────────────
   return (
     <div style={S.page}>
-      <style>{`@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=DM+Mono:wght@400;500&display=swap'); *{box-sizing:border-box;} body{background:#0f172a;margin:0;} input,select,textarea{-webkit-appearance:none;} input[type="date"]::-webkit-calendar-picker-indicator{cursor:pointer;}`}</style>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=DM+Mono:wght@400;500&display=swap');
+        *{box-sizing:border-box;} body{background:#0f172a;margin:0;}
+        input,select,textarea{-webkit-appearance:none;}
+        input[type="date"]::-webkit-calendar-picker-indicator{cursor:pointer;}
+        select{-webkit-appearance:none;-moz-appearance:none;}
+      `}</style>
 
       <div style={S.header}>
         <div style={S.logoBadge}>S</div>
         <h1 style={S.brand}>Sheetal Automobiles</h1>
-        <p style={S.sub}>Tata Motors Authorized Service Center · Nagpur</p>
+        <p style={S.sub}>Tata Motors Authorized Service Center · Malegaon</p>
         <p style={S.pageTitle}>🗓 Book a Service Appointment</p>
       </div>
 
@@ -685,118 +789,243 @@ export default function BookingPage() {
           </div>
 
           <Field label="Vehicle Number" required error={errors.vehicle_number}>
-            <div style={S.vnRow}>
-              <input
-                value={form.vehicle_number}
-                onChange={(e) => handleVN(e.target.value)}
-                placeholder="e.g. MH40AB1234"
-                maxLength={10}
-                style={inp("vehicle_number", {
-                  ...S.inputMono,
-                  paddingRight: 44,
-                })}
-                onFocus={() => setFocus("vehicle_number")}
-                onBlur={() => setFocus(null)}
-              />
-              <span style={S.vnIcon}>
-                {vnStatus === "looking" && "⏳"}
-                {vnStatus === "found" && "✅"}
-                {vnStatus === "new" && "🆕"}
-              </span>
-            </div>
+            <input
+              value={form.vehicle_number}
+              onChange={(e) => handleVN(e.target.value)}
+              placeholder="e.g. MH12AB1234"
+              maxLength={10}
+              style={inp("vehicle_number", S.inputMono)}
+              onFocus={() => setFocus("vehicle_number")}
+              onBlur={() => setFocus(null)}
+            />
           </Field>
 
-          {vnStatus === "found" && (
-            <div style={S.banner}>
-              <span>✅</span>
-              <span>
-                Known vehicle — your details have been filled in. Please verify
-                below.
-              </span>
+          {/* Duplicate booking banner */}
+          {existingBooking && (
+            <div
+              style={{
+                background: C.blueLt,
+                border: `1px solid ${C.blueBd}`,
+                borderRadius: 9,
+                padding: "12px 14px",
+                marginBottom: 14,
+                fontSize: 13,
+                color: "#1e40af",
+                lineHeight: 1.6,
+              }}
+            >
+              <div style={{ fontWeight: 700, marginBottom: 4 }}>
+                ℹ️ Active booking already exists for this vehicle
+              </div>
+              <div style={{ marginBottom: 8 }}>
+                There is a <strong>{existingBooking.status}</strong> booking
+                {existingBooking.preferred_date
+                  ? ` for ${fmtDate(existingBooking.preferred_date)}`
+                  : ""}
+                {existingBooking.ref_number
+                  ? ` (Ref: ${existingBooking.ref_number})`
+                  : ""}
+                .
+              </div>
+              <div style={{ fontSize: 12, color: "#1d4ed8" }}>
+                To reschedule it, call us at <strong>{RECEPTION_PHONE}</strong>.
+                Or continue below to submit a new request.
+              </div>
             </div>
           )}
 
-          <div style={S.row2}>
-            <Field label="Your Name" required error={errors.customer_name}>
+          {/* "Are you the vehicle owner?" toggle */}
+          <div style={{ marginBottom: 16 }}>
+            <Toggle
+              value={isOwner}
+              onChange={handleIsOwner}
+              label="I am the vehicle owner"
+            />
+            <div
+              style={{
+                fontSize: 12,
+                color: C.muted,
+                marginTop: 4,
+                paddingLeft: 54,
+              }}
+            >
+              {isOwner
+                ? "Fill in your name and contact number below."
+                : "Fill in the owner's details below, then your own."}
+            </div>
+          </div>
+
+          {/* Owner details — label changes based on toggle */}
+          <div style={row2}>
+            <Field
+              label={isOwner ? "Your Name" : "Vehicle Owner's Name"}
+              required
+              error={errors.owner_name}
+            >
               <input
-                value={form.customer_name}
-                onChange={(e) => set("customer_name")(e.target.value)}
+                value={form.owner_name}
+                onChange={(e) => set("owner_name")(e.target.value)}
                 placeholder="Full name"
-                style={inp("customer_name")}
-                onFocus={() => setFocus("customer_name")}
+                style={inp("owner_name")}
+                onFocus={() => setFocus("owner_name")}
                 onBlur={() => setFocus(null)}
               />
             </Field>
-            <Field label="Mobile Number" required error={errors.customer_phone}>
+
+            <Field
+              label={isOwner ? "Mobile Number" : "Owner's Mobile Number"}
+              required
+              error={errors.owner_phone}
+              hint={
+                form.owner_phone.length > 0 &&
+                form.owner_phone.length < 10 &&
+                !errors.owner_phone
+                  ? `${10 - form.owner_phone.length} more digit${10 - form.owner_phone.length === 1 ? "" : "s"} needed`
+                  : form.owner_phone.length === 10 && !errors.owner_phone
+                    ? "✓ Looks good"
+                    : null
+              }
+            >
               <input
-                value={form.customer_phone}
-                onChange={(e) =>
-                  set("customer_phone")(
-                    e.target.value.replace(/\D/g, "").slice(0, 10),
-                  )
-                }
-                placeholder="10-digit number"
+                value={form.owner_phone}
+                onChange={(e) => {
+                  const val = e.target.value.replace(/\D/g, "").slice(0, 10);
+                  set("owner_phone")(val);
+                  if (errors.owner_phone)
+                    setErrors((e) => ({ ...e, owner_phone: undefined }));
+                }}
+                placeholder="10-digit mobile number"
                 type="tel"
                 inputMode="numeric"
-                style={inp("customer_phone")}
-                onFocus={() => setFocus("customer_phone")}
-                onBlur={() => setFocus(null)}
+                style={{
+                  ...inp("owner_phone"),
+                  ...(form.owner_phone.length === 10 && !errors.owner_phone
+                    ? S.inputPrefilled
+                    : {}),
+                }}
+                onFocus={() => setFocus("owner_phone")}
+                onBlur={() => {
+                  setFocus(null);
+                  if (
+                    form.owner_phone.length > 0 &&
+                    form.owner_phone.length < 10
+                  )
+                    setErrors((e) => ({
+                      ...e,
+                      owner_phone: "Enter a valid 10-digit mobile number",
+                    }));
+                }}
               />
             </Field>
           </div>
 
-          <div style={S.row2}>
-            <Field label="Vehicle Model" optional error={errors.model}>
-              <select
-                value={form.model}
-                onChange={(e) => set("model")(e.target.value)}
-                style={{
-                  ...S.select,
-                  ...(prefilled && form.model ? S.inputPrefilled : {}),
-                  ...(errors.model ? S.inputError : {}),
-                }}
-              >
-                <option value="">Select model</option>
-                {TATA_MODELS.map((m) => (
-                  <option key={m} value={m}>
-                    {m}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <Field
-              label="Odometer Reading"
-              optional
-              error={errors.odometer_reading}
+          {/* Filler details — only when NOT the owner */}
+          {!isOwner && (
+            <div
+              style={{
+                background: "#f8fafc",
+                borderRadius: 9,
+                padding: "14px",
+                marginBottom: 4,
+                border: `1px solid ${C.border}`,
+              }}
             >
               <div
                 style={{
-                  ...S.inputGroup,
-                  ...(errors.odometer_reading ? { borderColor: C.red } : {}),
-                  ...(focus === "odometer"
-                    ? {
-                        borderColor: C.amber,
-                        boxShadow: "0 0 0 3px rgba(245,158,11,0.10)",
-                      }
-                    : {}),
+                  fontSize: 11,
+                  fontWeight: 700,
+                  color: C.sub,
+                  textTransform: "uppercase",
+                  letterSpacing: "0.6px",
+                  marginBottom: 12,
                 }}
               >
-                <input
-                  value={form.odometer_reading}
-                  onChange={(e) =>
-                    set("odometer_reading")(e.target.value.replace(/\D/g, ""))
-                  }
-                  placeholder="e.g. 15000"
-                  type="tel"
-                  inputMode="numeric"
-                  style={S.inputGroupInput}
-                  onFocus={() => setFocus("odometer")}
-                  onBlur={() => setFocus(null)}
-                />
-                <span style={S.inputGroupAddon}>km</span>
+                Your Details (Person Filling This Form)
               </div>
-            </Field>
-          </div>
+              <div style={row2}>
+                <Field label="Your Name" required error={errors.filler_name}>
+                  <input
+                    value={form.filler_name}
+                    onChange={(e) => set("filler_name")(e.target.value)}
+                    placeholder="Full name"
+                    style={inp("filler_name")}
+                    onFocus={() => setFocus("filler_name")}
+                    onBlur={() => setFocus(null)}
+                  />
+                </Field>
+                <Field label="Your Mobile" optional>
+                  <input
+                    value={form.filler_phone}
+                    onChange={(e) =>
+                      set("filler_phone")(
+                        e.target.value.replace(/\D/g, "").slice(0, 10),
+                      )
+                    }
+                    placeholder="10-digit number"
+                    type="tel"
+                    inputMode="numeric"
+                    style={inp("filler_phone")}
+                    onFocus={() => setFocus("filler_phone")}
+                    onBlur={() => setFocus(null)}
+                  />
+                </Field>
+              </div>
+            </div>
+          )}
+
+          {/* Vehicle Model */}
+          <Field label="Vehicle Model" required error={errors.model}>
+            <select
+              value={form.model}
+              onChange={(e) => set("model")(e.target.value)}
+              style={{
+                ...S.select,
+                ...(errors.model ? S.inputError : {}),
+                fontSize: 15,
+              }}
+            >
+              <option value="">Select model</option>
+              {TATA_MODELS.map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </select>
+          </Field>
+
+          {/* Odometer */}
+          <Field
+            label="Odometer Reading"
+            optional
+            error={errors.odometer_reading}
+          >
+            <div
+              style={{
+                ...S.inputGroup,
+                ...(errors.odometer_reading ? { borderColor: C.red } : {}),
+                ...(focus === "odometer"
+                  ? {
+                      borderColor: C.amber,
+                      boxShadow: "0 0 0 3px rgba(245,158,11,0.10)",
+                    }
+                  : {}),
+              }}
+            >
+              <input
+                value={form.odometer_reading}
+                onChange={(e) =>
+                  set("odometer_reading")(e.target.value.replace(/\D/g, ""))
+                }
+                placeholder="e.g. 15000"
+                type="tel"
+                inputMode="numeric"
+                style={S.inputGroupInput}
+                onFocus={() => setFocus("odometer")}
+                onBlur={() => setFocus(null)}
+              />
+              <span style={S.inputGroupAddon}>km</span>
+            </div>
+          </Field>
         </div>
 
         {/* ── Service Details ── */}
@@ -849,7 +1078,7 @@ export default function BookingPage() {
             <span>📅</span> Preferred Appointment
           </div>
 
-          <div style={S.row2}>
+          <div style={row2}>
             <Field
               label="Preferred Date"
               required
@@ -860,12 +1089,31 @@ export default function BookingPage() {
                 value={form.preferred_date}
                 min={minDate}
                 max={maxDate}
-                onChange={(e) => set("preferred_date")(e.target.value)}
+                onChange={(e) => handleDateChange(e.target.value)}
                 style={inp("preferred_date")}
                 onFocus={() => setFocus("preferred_date")}
                 onBlur={() => setFocus(null)}
               />
+              {!errors.preferred_date && dateWarning === "today" && (
+                <div style={S.warnBox}>
+                  <span>⚠️</span>
+                  <span>
+                    Bookings open from tomorrow onwards — today's slots are not
+                    available.
+                  </span>
+                </div>
+              )}
+              {!errors.preferred_date && dateWarning === "saturday" && (
+                <div style={S.warnBox}>
+                  <span>🔒</span>
+                  <span>
+                    We're closed on Saturdays. Please pick a weekday (Mon–Fri)
+                    or Sunday.
+                  </span>
+                </div>
+              )}
             </Field>
+
             <Field label="Preferred Time" optional>
               <select
                 value={form.preferred_time}
@@ -892,7 +1140,7 @@ export default function BookingPage() {
             }}
           >
             ℹ️ This is a <strong>request</strong> — our team will call you to
-            confirm. Service hours: Mon–Sat, 9:00 AM – 6:00 PM.
+            confirm. Service hours: Mon–Fri & Sun, 9:30 AM – 6:30 PM.
           </div>
         </div>
 
@@ -902,16 +1150,16 @@ export default function BookingPage() {
             <span>👤</span> Referral
           </div>
           <Field
-            label="Contact Person at Sheetal"
+            label="Referred by (Sheetal Staff)"
             optional
-            hint="Name of the Sheetal staff member who referred you, if any."
+            hint="Name of the Sheetal team member who referred you, if any."
           >
             <input
-              value={form.contact_person}
-              onChange={(e) => set("contact_person")(e.target.value)}
-              placeholder="e.g. Tauseef Shaikh"
-              style={inp("contact_person")}
-              onFocus={() => setFocus("contact_person")}
+              value={form.referral_person}
+              onChange={(e) => set("referral_person")(e.target.value)}
+              placeholder="e.g. Gokul"
+              style={inp("referral_person")}
+              onFocus={() => setFocus("referral_person")}
               onBlur={() => setFocus(null)}
             />
           </Field>
