@@ -1503,11 +1503,33 @@ function VehicleDetailModal({
   );
 }
 // ─── Vehicle List Card (compact row) ─────────────────────────────────────────
+const BILLING_STAGE_LABELS = {
+  front_checkup: "🔍 Front Checkup",
+  advisor_review: "👔 Advisor Review",
+  pending: "🔧 Workshop",
+  pdi: "🔎 PDI",
+  billing: "🧾 Billing",
+  payment: "💳 Payment",
+  ready_for_exit: "🚪 Ready for Exit",
+  completed: "✅ Completed",
+};
+const BILLING_STAGE_ORDER = [
+  "front_checkup",
+  "advisor_review",
+  "pending",
+  "pdi",
+  "billing",
+  "payment",
+  "ready_for_exit",
+  "completed",
+];
+
 function VehicleListCard({
   vehicle,
   extraData,
   onViewDetails,
   onGenerateBill,
+  showStage,
 }) {
   const ws = vehicle.work_stages?.[0];
   const isOverdue =
@@ -1566,6 +1588,12 @@ function VehicleListCard({
             {vehicle.model && (
               <Chip color={C.blue} bg={C.blueLight}>
                 {vehicle.model}
+              </Chip>
+            )}
+            {showStage && (
+              <Chip color={C.textMuted} bg={C.surfaceElevated}>
+                {BILLING_STAGE_LABELS[vehicle.current_stage] ||
+                  (vehicle.current_stage || "—").replace(/_/g, " ")}
               </Chip>
             )}
             {vehicle.priority !== "normal" && (
@@ -2131,6 +2159,8 @@ function BillingDashboard({ user, onLogout }) {
     waitingPayment: [],
     dueToday: [],
   });
+  const [allVehicles, setAllVehicles] = useState([]); // every active vehicle, gate-in onward — browse/search
+  const [allVehiclesExpanded, setAllVehiclesExpanded] = useState(false);
   const [extraData, setExtraData] = useState({});
   const [overrideVehicles, setOverrideVehicles] = useState([]);
   const [users, setUsers] = useState([]);
@@ -2146,7 +2176,8 @@ function BillingDashboard({ user, onLogout }) {
     if (showLoader) setLoading(true);
     setLoadError(null);
     try {
-      const [vRes, workshopRes, pdiRes, dueTodayRes, usRes, trRes, overrideRes] =
+      const todayStartUTC = getISTMidnightUTC();
+      const [vRes, workshopRes, pdiRes, dueTodayRes, usRes, trRes, overrideRes, allRes] =
         await withTimeout(Promise.all([
           // ① Ready to bill: in pdi or billing stage, no bill yet
           // FIX 6: .is("deleted_at", null) on all vehicle queries
@@ -2216,24 +2247,39 @@ function BillingDashboard({ user, onLogout }) {
             .eq("billed_by_cashier_override_reviewed", false)
             .is("deleted_at", null)
             .order("billed_by_cashier_override_at", { ascending: false }),
+
+          // ⑥ All Vehicles — gate-in onward, so Billing sees every vehicle in the
+          // system (not just the curated queues above), same convention as the
+          // Owner Overview's active-vehicles fetch: active regardless of stage,
+          // plus anything that entered (and possibly also finished) today.
+          supabase
+            .from("vehicles")
+            .select(
+              "*, work_stages(*), customer_complaints(*), advisor:users!vehicles_advisor_id_fkey(full_name)",
+            )
+            .or(`current_stage.neq.completed,entry_time.gte.${todayStartUTC}`)
+            .is("deleted_at", null)
+            .order("entry_time", { ascending: false }),
         ]));
 
       const vList = vRes.data || [];
       const workshopList = workshopRes.data || [];
+      const allList = allRes.data || [];
       setVehicles(vList);
       setWorkshopVehicles(workshopList);
       setPipeline({
         waitingPayment: pdiRes.data || [],
         dueToday: dueTodayRes.data || [],
       });
+      setAllVehicles(allList);
       setUsers(usRes.data || []);
       setTeams(trRes.data || []);
       setOverrideVehicles(overrideRes.data || []);
 
       // Fetch per-dept detail for all vehicles
-      const allVehicles = [...vList, ...workshopList];
-      if (allVehicles.length > 0) {
-        const ids = allVehicles.map((v) => v.id);
+      const deptDetailTargets = [...vList, ...workshopList, ...allList];
+      if (deptDetailTargets.length > 0) {
+        const ids = [...new Set(deptDetailTargets.map((v) => v.id))];
         const [tmRes, wdRes, alRes] = await withTimeout(Promise.all([
           supabase.from("three_m_details").select("*").in("vehicle_id", ids),
           supabase.from("washing_details").select("*").in("vehicle_id", ids),
@@ -2754,10 +2800,84 @@ function BillingDashboard({ user, onLogout }) {
 
         {/* ③ Pipeline sections */}
         <PipelineSection
-          waitingPayment={pipeline.waitingPayment}
-          dueToday={pipeline.dueToday}
+          waitingPayment={filterVehicles(pipeline.waitingPayment)}
+          dueToday={filterVehicles(pipeline.dueToday)}
           onEditBill={(v) => setBillTarget(v)}
         />
+
+        {/* ④ All Vehicles — every active/today vehicle, gate-in onward, not
+            already shown above. Collapsed by default (this dashboard's main
+            job is the curated queues above) but auto-expands while searching,
+            same pattern as Cashier's "Other Vehicles". */}
+        {(() => {
+          const shownIds = new Set([
+            ...vehicles.map((v) => v.id),
+            ...workshopVehicles.map((v) => v.id),
+            ...pipeline.waitingPayment.map((v) => v.id),
+            ...pipeline.dueToday.map((v) => v.id),
+          ]);
+          const other = filterVehicles(
+            allVehicles.filter((v) => !shownIds.has(v.id)),
+          );
+          const isSearching = searchQuery.trim().length > 0;
+          const visible = allVehiclesExpanded || isSearching;
+          if (other.length === 0 && !isSearching) return null;
+          return (
+            <div style={{ marginTop: 24 }}>
+              <div
+                onClick={() => setAllVehiclesExpanded((p) => !p)}
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  cursor: "pointer",
+                  padding: "10px 4px",
+                  userSelect: "none",
+                }}
+              >
+                <SectionLabel
+                  icon="🚗"
+                  title="All Vehicles"
+                  count={other.length}
+                  color={C.textSecondary}
+                  note="every active vehicle, gate-in onward"
+                />
+                <span style={{ fontSize: 13, color: C.textMuted }}>
+                  {visible ? "▲ Collapse" : "▼ Expand"}
+                </span>
+              </div>
+              {visible &&
+                (other.length === 0 ? (
+                  <div
+                    style={{
+                      background: C.surface,
+                      border: `1px solid ${C.border}`,
+                      borderRadius: 10,
+                      padding: "24px 20px",
+                      textAlign: "center",
+                      color: C.textMuted,
+                      fontSize: 13,
+                    }}
+                  >
+                    No match for &quot;{searchQuery}&quot;
+                  </div>
+                ) : (
+                  <div style={{ display: "grid", gap: 12 }}>
+                    {other.map((v) => (
+                      <VehicleListCard
+                        key={v.id}
+                        vehicle={v}
+                        extraData={extraData[v.id]}
+                        onViewDetails={() => setDetailVehicle(v)}
+                        onGenerateBill={() => setBillTarget(v)}
+                        showStage
+                      />
+                    ))}
+                  </div>
+                ))}
+            </div>
+          );
+        })()}
       </div>
 
       {/* Bill modal (quick from list) */}
@@ -2776,6 +2896,7 @@ function BillingDashboard({ user, onLogout }) {
           vehicle={
             vehicles.find((v) => v.id === detailVehicle.id) ||
             workshopVehicles.find((v) => v.id === detailVehicle.id) ||
+            allVehicles.find((v) => v.id === detailVehicle.id) ||
             detailVehicle
           }
           extraData={extraData[detailVehicle.id]}

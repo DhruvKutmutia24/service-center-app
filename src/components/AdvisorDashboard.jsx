@@ -138,14 +138,6 @@ const TIME_LABELS = {
   "14:00-16:00": "2-4 PM",
   "16:00-18:00": "4-6 PM",
 };
-const PIPELINE_STAGE_LABELS = {
-  advisor_review: "👔 Needs Assignment",
-  pending: "⏳ In Workshop",
-  pdi: "🔍 PDI",
-  billing: "🧾 Billing",
-  payment: "💳 Payment",
-};
-
 // ─── Helpers ────────────────────────────────────────────────────────────────
 // A stalled network request (backgrounded/throttled tab, dropped connection) never
 // resolves or rejects on its own, which leaves an unguarded fetch's `finally` block
@@ -161,6 +153,19 @@ const toZ = (s) =>
   !s ? s : /Z$|[+-]\d{2}:?\d{2}$/.test(s) ? s : s.replace(" ", "T") + "Z";
 const todayIST = () =>
   new Date(Date.now() + 5.5 * 3600000).toISOString().slice(0, 10);
+// A date/time picker's value is the advisor's IST wall-clock intent, but every
+// timestamp column in this app is true UTC (written via toISOString(), read
+// back via toZ()). Treating the picked digits as literal UTC — the bug this
+// pair fixes — silently pushes the stored deadline 5.5h later than intended.
+const istWallToUTCISO = (dateStr, timeStr) =>
+  dateStr && timeStr
+    ? new Date(new Date(`${dateStr}T${timeStr}:00Z`).getTime() - 5.5 * 3600000).toISOString()
+    : null;
+const utcISOToISTWall = (iso) => {
+  if (!iso) return null;
+  const d = new Date(new Date(toZ(iso)).getTime() + 5.5 * 3600000).toISOString();
+  return { date: d.slice(0, 10), time: d.slice(11, 16) };
+};
 const formatIST = (s) => {
   if (!s) return "—";
   return new Date(toZ(s)).toLocaleString("en-IN", {
@@ -748,41 +753,6 @@ function VehicleCard({ vehicle, isBooked, isRevisit, actionLabel, onAction, acti
   );
 }
 
-// ─── VehicleListItem — compact row, used in All Vehicles ───────────────────
-function VehicleListItem({ vehicle, stageLabel, onPress }) {
-  return (
-    <div
-      onClick={onPress}
-      style={{
-        display: "flex",
-        justifyContent: "space-between",
-        alignItems: "center",
-        padding: "11px 14px",
-        backgroundColor: C.raised,
-        borderRadius: 8,
-        border: `1px solid ${C.border}`,
-        cursor: "pointer",
-      }}
-      onMouseEnter={(e) => (e.currentTarget.style.background = C.surface)}
-      onMouseLeave={(e) => (e.currentTarget.style.background = C.raised)}
-    >
-      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-        <span style={{ fontWeight: 800, color: C.text, fontSize: 14, fontFamily: "'DM Mono',monospace" }}>
-          {vehicle.vehicle_number}
-        </span>
-        <ModelBadge model={vehicle.model} />
-        <PriorityBadge priority={vehicle.priority} />
-      </div>
-      <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-        <span style={{ fontSize: 12, color: C.textSec }}>{vehicle.customer_name || "—"}</span>
-        <Chip color={C.navy} bg={C.raised} style={{ border: `1px solid ${C.border}` }}>
-          {stageLabel}
-        </Chip>
-      </div>
-    </div>
-  );
-}
-
 // ─── Assign tab ─────────────────────────────────────────────────────────────
 function AssignTab({ vehicles, bookedTodayIds, recentVisitNums, onAssign, onDetails }) {
   const list = vehicles.filter(
@@ -831,38 +801,1004 @@ function PDITab({ vehicles, user, onPDI, onReassign, onDetails }) {
   );
 }
 
-// ─── All Vehicles tab ───────────────────────────────────────────────────────
-function AllVehiclesTab({ vehicles, onDetails }) {
-  const [q, setQ] = useState("");
-  const filtered = vehicles.filter((v) => {
-    if (!q.trim()) return true;
-    const s = q.toLowerCase();
+// ─── Overview tab — same aggregate timeline design as the Owner Dashboard's
+// Overview tab (stat cards, a single-line Vehicle Journey tracker, a
+// Workshop Departments panel, and a sticky-header timeline table), ported to
+// this file's own C palette/components rather than imported — this codebase
+// deliberately keeps each dashboard self-contained (see OwnerDashboard.jsx).
+const OV_STAGE_SEQUENCE = ["front_checkup", "advisor_review", "workshop", "billing", "payment", "ready_for_exit", "completed"];
+const ovNormalizeStage = (s) => (s === "pending" || s === "pdi" ? "workshop" : s);
+const ovStageIdx = (v) => OV_STAGE_SEQUENCE.indexOf(ovNormalizeStage(v.current_stage));
+
+// "Ready for Exit" and "Completed" merge into one "Exit" column, same as
+// Owner's Overview — a vehicle can't be simultaneously "ready to exit" and
+// "already exited", so two separate ticks for that never made sense.
+//
+// Two different stage lists are used depending on which overview is showing:
+// OV_JOURNEY_STAGES (Advisor→Exit) drives the Vehicle Journey tracker and "My
+// Overview"'s table — Entry/Front Checkup happen before the advisor is
+// involved at all, so they're dropped from an advisor's working timeline.
+// OV_FULL_FLOW_STAGES (Entry→Exit) is the literal Owner Dashboard stage list,
+// used only by "Complete Overview".
+const OV_JOURNEY_STAGES = [
+  { key: "advisor", label: "Advisor" },
+  { key: "workshop", label: "Workshop" },
+  { key: "billing", label: "Billing" },
+  { key: "cashier", label: "Cashier" },
+  { key: "exit", label: "Exit" },
+];
+// My Overview's table itself goes Workshop→Exit — Advisor stays visible only
+// as the first node of the Journey tracker above it (and clicking that node
+// opens the Assign tab instead of filtering, since that's the actual place
+// an advisor acts on an unassigned vehicle).
+const OV_TABLE_STAGES = OV_JOURNEY_STAGES.filter((s) => s.key !== "advisor");
+const OV_FULL_FLOW_STAGES = [
+  { key: "entry", label: "Entry" },
+  { key: "front_checkup", label: "Front Checkup" },
+  { key: "advisor", label: "Advisor" },
+  { key: "workshop", label: "Workshop" },
+  { key: "billing", label: "Billing" },
+  { key: "cashier", label: "Cashier" },
+  { key: "exit", label: "Exit" },
+];
+const OV_COL_SEQ_IDX = { front_checkup: 0, advisor: 1, workshop: 2, billing: 3, cashier: 4, exit: 6 };
+
+function ovFlowStage(v, key) {
+  if (key === "entry") return { done: !!v.entry_time, time: v.entry_time };
+  const seqIdx = OV_COL_SEQ_IDX[key];
+  const vIdx = ovStageIdx(v);
+  const done = vIdx === -1 ? false : seqIdx === 6 ? vIdx === 6 : vIdx > seqIdx;
+  switch (key) {
+    case "front_checkup":
+      return { done, skipped: !!v.fc_skipped_at, time: v.job_card_completed_at || v.fc_skipped_at || v.fc_cancelled_at || null };
+    case "advisor":
+      return { done, time: v.work_stages?.[0]?.created_at || null };
+    case "workshop":
+      return { done, time: v.workshop_completed_at || null };
+    case "billing":
+      return { done, time: v.bill_generated_at || null };
+    case "cashier":
+      return { done, time: v.payment_received_at || null };
+    case "exit":
+      return { done, time: v.actual_completion_time || v.exit_time || v.updated_at || null };
+    default:
+      return { done: false, time: null };
+  }
+}
+// "At current_stage === payment" undercounts what cashier actually needs to
+// track — a vehicle billed (incl. via cashier override) and partially paid
+// can still be sitting at PDI or earlier, not yet formally at the "payment"
+// stage. Mirrors CashierDashboard.jsx's own "At Cashier" criteria so Owner's
+// and the Advisor's Overview counts agree with what Cashier actually shows.
+function ovIsAwaitingCashier(v) {
+  return (
+    parseFloat(v.bill_amount) > 0 &&
+    v.payment_status !== "paid" &&
+    v.payment_status !== "credit" &&
+    !["ready_for_exit", "completed"].includes(v.current_stage)
+  );
+}
+function ovIsQueuedAt(v, key) {
+  if (key === "entry") return false;
+  if (key === "cashier") return ovIsAwaitingCashier(v);
+  const seqIdx = OV_COL_SEQ_IDX[key];
+  const vIdx = ovStageIdx(v);
+  if (vIdx === -1) return false;
+  return seqIdx === 6 ? vIdx === 5 : vIdx === seqIdx;
+}
+function ovDeptState(v, deptKey) {
+  const ws = v.work_stages?.[0];
+  if (!ws?.[`${deptKey}_required`]) return "not_assigned";
+  const status = ws?.[`${deptKey}_status`];
+  if (status === "completed") return "completed";
+  if (status === "in_progress" || status === "on_hold") return "in_progress";
+  return "not_started";
+}
+const ovIstDateStr = (iso) => new Date(new Date(toZ(iso)).getTime() + 5.5 * 3600000).toISOString().slice(0, 10);
+
+const OV_PULSE_KEYFRAMES = `
+@keyframes ovPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(220,38,38,0.35); }
+  50% { box-shadow: 0 0 0 5px rgba(220,38,38,0); }
+}`;
+
+const OV_TH_STICKY = { position: "sticky", top: 0, zIndex: 2, background: C.raised };
+const OV_TH_STICKY_CENTER = { ...OV_TH_STICKY, textAlign: "center" };
+const OvTH = ({ children, style = {} }) => (
+  <th
+    style={{
+      padding: "8px 12px",
+      textAlign: "left",
+      fontSize: 10,
+      fontWeight: 800,
+      color: C.textMuted,
+      textTransform: "uppercase",
+      letterSpacing: "0.5px",
+      whiteSpace: "nowrap",
+      borderBottom: `2px solid ${C.border}`,
+      ...style,
+    }}
+  >
+    {children}
+  </th>
+);
+const OvTD = ({ children, style = {} }) => (
+  <td style={{ padding: "9px 12px", fontSize: 13, color: C.text, borderBottom: `1px solid ${C.border}`, ...style }}>
+    {children}
+  </td>
+);
+
+// One cell per stage column, dot centered within its own <td> so it lines up
+// exactly under its (center-aligned) header — see OwnerDashboard.jsx's
+// FlowStepperCell for the alignment bug this pattern avoids.
+function OvStepperCell({ isFirst, isLast, leftDone, rightDone, done, isCurrent, isSkipped, isWorkshopCol, onClick }) {
+  return (
+    <div
+      style={{ position: "relative", height: 32, display: "flex", alignItems: "center", justifyContent: "center", cursor: isWorkshopCol ? "pointer" : "default" }}
+      onClick={isWorkshopCol ? onClick : undefined}
+    >
+      {!isFirst && (
+        <div style={{ position: "absolute", left: 0, right: "50%", top: "50%", marginTop: -1.5, height: 3, borderRadius: 999, background: leftDone ? C.green : C.border }} />
+      )}
+      {!isLast && (
+        <div style={{ position: "absolute", left: "50%", right: 0, top: "50%", marginTop: -1.5, height: 3, borderRadius: 999, background: rightDone ? C.green : C.border }} />
+      )}
+      <div
+        style={{
+          position: "relative",
+          zIndex: 1,
+          width: 15,
+          height: 15,
+          borderRadius: "50%",
+          background: isSkipped ? C.amber : done ? C.green : isCurrent ? C.red : C.surface,
+          border: `2.5px solid ${isSkipped ? C.amber : done ? C.green : isCurrent ? C.red : C.border}`,
+          boxShadow: isCurrent ? `0 0 0 4px ${C.red}22` : "none",
+          animation: isCurrent ? "ovPulse 1.8s ease-in-out infinite" : "none",
+        }}
+      />
+    </div>
+  );
+}
+
+// Workshop-view dot: parallel departments, independently colored circle. Same
+// four states/colors as Owner's DeptStatusDot.
+function OvDeptDot({ state, size = 15 }) {
+  const fillMap = { not_assigned: C.textMuted, not_started: "#ffffff", in_progress: C.amber, completed: C.green };
+  return (
+    <div
+      title={state.replace(/_/g, " ")}
+      style={{ width: size, height: size, borderRadius: "50%", background: fillMap[state] || C.textMuted, border: `1.5px solid ${C.text}`, margin: "0 auto" }}
+    />
+  );
+}
+
+function OvExpCompletionCell({ exp, exited }) {
+  if (!exp) {
     return (
-      v.vehicle_number?.toLowerCase().includes(s) ||
-      v.customer_name?.toLowerCase().includes(s)
+      <OvTD style={{ fontSize: 12, color: C.textMuted, textAlign: "center", whiteSpace: "nowrap" }}>—</OvTD>
     );
+  }
+  const overdue = !exited && new Date(toZ(exp)) < new Date();
+  return (
+    <OvTD style={{ fontSize: 12, fontWeight: overdue ? 800 : 400, color: overdue ? C.red : C.textSec, textAlign: "center", whiteSpace: "nowrap" }}>
+      {formatIST(exp)}
+    </OvTD>
+  );
+}
+
+const OvStatCard = ({ label, value, color, active, disabled, sub, onClick }) => (
+  <div
+    onClick={!disabled ? onClick : undefined}
+    style={{
+      background: active ? color + "14" : C.surface,
+      border: `1px solid ${active ? color + "55" : C.border}`,
+      borderLeft: `4px solid ${active ? color : C.border}`,
+      borderRadius: 8,
+      padding: "9px 14px",
+      boxShadow: C.shadow,
+      cursor: disabled ? "default" : "pointer",
+      opacity: disabled ? 0.5 : 1,
+      minWidth: 0,
+    }}
+  >
+    <div style={{ fontSize: 11.5, fontWeight: 700, color: C.textMuted, textTransform: "uppercase", letterSpacing: "0.4px" }}>{label}</div>
+    <div style={{ fontSize: 27, fontWeight: 800, color: disabled ? C.textMuted : color, fontFamily: "'DM Mono',monospace", marginTop: 1, lineHeight: 1 }}>
+      {value}
+    </div>
+    {sub && <div style={{ fontSize: 10.5, color: C.textMuted, marginTop: 2 }}>{sub}</div>}
+  </div>
+);
+
+// A calm, always-connected line rather than a per-vehicle progress bar — with
+// many vehicles in flight, there's no single "how far along" position. Each
+// dot's color carries the live signal (green = clear, amber-pulsing =
+// vehicles currently waiting there); the two numbers below each step are
+// "queued now" and "cleared today". The Advisor node can be wired to open the
+// Assign tab instead of filtering (see onAdvisorClick) — that's where an
+// advisor actually acts on an unassigned vehicle, not this table.
+function OvJourneyTracker({ stages, vehicles, activeFilter, onSelect, onAdvisorClick }) {
+  const today = todayIST();
+  const stepStats = stages.map((s) => {
+    const queued = vehicles.filter((v) => ovIsQueuedAt(v, s.key)).length;
+    const doneToday = vehicles.filter((v) => {
+      const info = ovFlowStage(v, s.key);
+      return info.done && info.time && ovIstDateStr(info.time) === today;
+    }).length;
+    return { ...s, queued, doneToday };
   });
   return (
+    <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, boxShadow: C.shadow, padding: "12px 26px 13px", marginBottom: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12 }}>
+        <span style={{ fontSize: 14.5, fontWeight: 700, color: C.text }}>Vehicle Journey</span>
+        <span style={{ fontSize: 12, fontWeight: 600, color: C.textMuted }}>{vehicles.length} active</span>
+      </div>
+      <div style={{ position: "relative", display: "flex", justifyContent: "space-between" }}>
+        <div style={{ position: "absolute", top: 7, left: "5%", right: "5%", height: 3, borderRadius: 999, background: C.green, boxShadow: `0 0 10px ${C.green}66` }} />
+        {stepStats.map((s) => {
+          const isActive = activeFilter?.type === "flow" && activeFilter.key === s.key;
+          const isLive = s.queued > 0;
+          const clickable = s.key !== "entry";
+          const handleClick = () => {
+            if (s.key === "advisor" && onAdvisorClick) onAdvisorClick();
+            else onSelect(s.key);
+          };
+          return (
+            <div
+              key={s.key}
+              onClick={clickable ? handleClick : undefined}
+              title={s.key === "advisor" && onAdvisorClick ? "Open the Assign tab" : undefined}
+              style={{ position: "relative", zIndex: 1, display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center", cursor: clickable ? "pointer" : "default", flex: 1 }}
+            >
+              <div
+                style={{
+                  width: 15,
+                  height: 15,
+                  borderRadius: "50%",
+                  marginBottom: 6,
+                  background: isActive ? C.cyan : isLive ? C.amber : C.green,
+                  border: `2.5px solid ${isActive ? C.cyan : isLive ? C.amber : C.green}`,
+                  boxShadow: isActive ? `0 0 0 4px ${C.cyanLight}` : isLive ? `0 0 0 4px ${C.amber}22` : "none",
+                  animation: isLive && !isActive ? "ovPulse 1.8s ease-in-out infinite" : "none",
+                  transition: "all 0.15s",
+                }}
+              />
+              <div style={{ fontSize: 14.5, fontWeight: 700, color: C.textSec }}>{s.label}</div>
+              <div style={{ display: "flex", gap: 12, marginTop: 5, fontFamily: "'DM Mono',monospace", fontSize: 17, fontWeight: 800 }}>
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: C.text }}>
+                  <span style={{ width: 7, height: 7, borderRadius: "50%", background: C.borderStr, flexShrink: 0 }} />
+                  {s.queued}
+                </span>
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: C.text }}>
+                  <span style={{ width: 7, height: 7, borderRadius: "50%", background: C.green, flexShrink: 0 }} />
+                  {s.doneToday}
+                </span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ display: "flex", justifyContent: "center", gap: 18, marginTop: 12, fontSize: 11.5, color: C.textMuted, fontWeight: 600 }}>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+          <span style={{ width: 7, height: 7, borderRadius: "50%", background: C.borderStr }} />
+          Queued now
+        </span>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+          <span style={{ width: 7, height: 7, borderRadius: "50%", background: C.green }} />
+          Done today
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// Tile breakdown reads Queue → In Progress → Done, left to right, matching
+// the order work actually moves through. "Done" is scoped to today only —
+// work_stages has no {dept}_completed_at column, so this reads the same
+// vehicle_history rows Owner's Workshop Departments panel uses. This is the
+// single most important panel on an advisor's Overview — the workshop is
+// where their vehicles actually sit most of the day.
+function OvDeptPanel({ vehicles, deptHistory, activeFilter, onSelect }) {
+  const today = todayIST();
+  return (
+    <div style={{ background: C.raised, border: `1.5px dashed ${C.borderStr}`, borderRadius: 12, padding: "12px 22px 14px", marginBottom: 16 }}>
+      <div style={{ fontSize: 14.5, fontWeight: 700, color: C.text, marginBottom: 10 }}>Workshop Departments</div>
+      <div style={{ display: "grid", gridTemplateColumns: `repeat(${DEPT_KEYS.length}, 1fr)`, gap: 11 }}>
+        {DEPT_KEYS.map((dk) => {
+          const dm = DEPT_META[dk];
+          let pending = 0;
+          let active = 0;
+          let done = 0;
+          vehicles.forEach((v) => {
+            const state = ovDeptState(v, dk);
+            if (state === "not_assigned") return;
+            if (state === "not_started") pending += 1;
+            else if (state === "in_progress") active += 1;
+            else if (state === "completed") {
+              const end = deptHistory?.[v.id]?.[dk];
+              if (end && ovIstDateStr(end) === today) done += 1;
+            }
+          });
+          const total = pending + active + done;
+          const isActive = activeFilter?.type === "dept" && activeFilter.key === dk;
+          return (
+            <div
+              key={dk}
+              onClick={() => onSelect(dk)}
+              style={{
+                background: C.surface,
+                border: `1px solid ${isActive ? C.cyan : C.border}`,
+                borderRadius: 10,
+                padding: "9px 12px 10px",
+                minWidth: 0,
+                boxShadow: isActive ? C.shadowMd : C.shadow,
+                cursor: "pointer",
+                transition: "box-shadow 0.15s",
+              }}
+            >
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 7 }}>
+                <span style={{ fontSize: 11.5, fontWeight: 700, color: C.text }}>{dm.icon} {dm.label}</span>
+              </div>
+              {total > 0 ? (
+                <>
+                  <div style={{ display: "flex", height: 6, borderRadius: 3, overflow: "hidden", background: C.border, marginBottom: 7 }}>
+                    <span style={{ width: `${(pending / total) * 100}%`, background: C.borderStr }} />
+                    <span style={{ width: `${(active / total) * 100}%`, background: C.amber }} />
+                    <span style={{ width: `${(done / total) * 100}%`, background: C.green }} />
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "center", gap: 10, fontSize: 15, fontWeight: 800, color: C.textSec, fontFamily: "'DM Mono',monospace" }}>
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                      <span style={{ width: 6, height: 6, borderRadius: "50%", background: C.borderStr, flexShrink: 0 }} />
+                      {pending}
+                    </span>
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                      <span style={{ width: 6, height: 6, borderRadius: "50%", background: C.amber, flexShrink: 0 }} />
+                      {active}
+                    </span>
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                      <span style={{ width: 6, height: 6, borderRadius: "50%", background: C.green, flexShrink: 0 }} />
+                      {done}
+                    </span>
+                  </div>
+                </>
+              ) : (
+                <div style={{ fontSize: 10.5, color: C.textMuted, fontStyle: "italic" }}>No vehicles</div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ display: "flex", gap: 16, marginTop: 12, fontSize: 11, color: C.textMuted, fontWeight: 600 }}>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+          <span style={{ width: 7, height: 7, borderRadius: "50%", background: C.borderStr }} />
+          Queue
+        </span>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+          <span style={{ width: 7, height: 7, borderRadius: "50%", background: C.amber }} />
+          In Progress
+        </span>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+          <span style={{ width: 7, height: 7, borderRadius: "50%", background: C.green }} />
+          Done today
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// Shared table — Overall view shows the flow stepper across `stageColumns`;
+// Workshop view swaps to one column per department with a status dot, same
+// toggle Owner's Overview offers, so an advisor can see exactly which team
+// still owes work on a vehicle without opening every row.
+function OvTimelineTable({ vehicles, advisorNameById, view, stageColumns, onDetails }) {
+  const columns = view === "workshop" ? DEPT_KEYS.map((k) => ({ key: k, label: DEPT_META[k].label })) : stageColumns;
+  const reservedPx = 460; // 330 leading (100+110+120) + 130 trailing (Exp. Completion)
+  return (
+    <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 8, boxShadow: C.shadow }}>
+      <div style={{ overflowX: "auto", overflowY: "auto", maxHeight: 640, borderRadius: 8 }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed" }}>
+          <colgroup>
+            <col style={{ width: 100 }} />
+            <col style={{ width: 110 }} />
+            <col style={{ width: 120 }} />
+            {columns.map((c) => (
+              <col key={c.key} style={{ width: `calc((100% - ${reservedPx}px) / ${columns.length})` }} />
+            ))}
+            <col style={{ width: 130 }} />
+          </colgroup>
+          <thead>
+            <tr style={{ background: C.raised }}>
+              <OvTH style={OV_TH_STICKY}>Entry Time</OvTH>
+              <OvTH style={OV_TH_STICKY}>Vehicle Number</OvTH>
+              <OvTH style={OV_TH_STICKY}>Advisor Name</OvTH>
+              {columns.map((c) => (
+                <OvTH key={c.key} style={OV_TH_STICKY_CENTER}>
+                  {c.label}
+                </OvTH>
+              ))}
+              <OvTH style={OV_TH_STICKY_CENTER}>Exp. Completion</OvTH>
+            </tr>
+          </thead>
+          <tbody>
+            {vehicles.length === 0 && (
+              <tr>
+                <td colSpan={3 + columns.length + 1} style={{ padding: 30, textAlign: "center", color: C.textMuted, fontSize: 13 }}>
+                  No vehicles match this filter.
+                </td>
+              </tr>
+            )}
+            {vehicles.map((v) => {
+              const stageInfos = view === "workshop" ? null : columns.map((s) => ovFlowStage(v, s.key));
+              const firstIncompleteIdx = stageInfos ? stageInfos.findIndex((s) => !s.done) : -1;
+              return (
+                <tr
+                  key={v.id}
+                  onMouseEnter={(e) => (e.currentTarget.style.background = C.raised)}
+                  onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+                >
+                  <OvTD style={{ fontSize: 12, color: C.textSec, whiteSpace: "nowrap" }}>{formatIST(v.entry_time)}</OvTD>
+                  <OvTD>
+                    <span onClick={() => onDetails(v)} style={{ fontWeight: 800, fontFamily: "'DM Mono',monospace", color: C.blue, cursor: "pointer" }}>
+                      {v.vehicle_number}
+                    </span>
+                  </OvTD>
+                  <OvTD style={{ fontSize: 12, color: C.textSec, whiteSpace: "nowrap" }}>{advisorNameById.get(v.advisor_id) || "—"}</OvTD>
+                  {view === "workshop"
+                    ? columns.map((d) => (
+                        <OvTD key={d.key} style={{ textAlign: "center" }}>
+                          <OvDeptDot state={ovDeptState(v, d.key)} />
+                        </OvTD>
+                      ))
+                    : columns.map((s, i) => {
+                        const info = stageInfos[i];
+                        const isSkipped = s.key === "front_checkup" && info.done && info.skipped;
+                        return (
+                          <OvTD key={s.key} style={{ padding: 0 }}>
+                            <OvStepperCell
+                              isFirst={i === 0}
+                              isLast={i === columns.length - 1}
+                              leftDone={i > 0 ? stageInfos[i - 1].done : false}
+                              rightDone={info.done}
+                              done={info.done}
+                              isCurrent={i === firstIncompleteIdx}
+                              isSkipped={isSkipped}
+                              isWorkshopCol={s.key === "workshop"}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onDetails(v);
+                              }}
+                            />
+                          </OvTD>
+                        );
+                      })}
+                  <OvExpCompletionCell
+                    exp={v.expected_completion_time}
+                    exited={v.current_stage === "completed" || v.current_stage === "ready_for_exit"}
+                  />
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+const ovSelectStyle = {
+  padding: "7px 10px",
+  border: `1px solid ${C.border}`,
+  borderRadius: 6,
+  fontSize: 13,
+  color: C.text,
+  background: C.surface,
+  outline: "none",
+  fontFamily: "inherit",
+  cursor: "pointer",
+};
+
+// ─── My Overview — the advisor's personal working view: timeline starts at
+// Workshop (Advisor stays visible only in the Journey tracker above, wired to
+// open Assign), Workshop Departments front and center. ─────────────────────
+function AdvisorMyOverview({ vehicles: allVehicles, user, advisorNameById, deptHistory, onDetails, onOpenAssign }) {
+  const [activeFilter, setActiveFilter] = useState(null); // { type: "stat"|"flow"|"dept", key }
+  const [search, setSearch] = useState("");
+  const [sortDir, setSortDir] = useState("desc");
+  const [view, setView] = useState("overall"); // overall | workshop
+
+  // "My" means his — every card, the journey tracker, the departments panel,
+  // and the table all scope to just this advisor's own vehicles, not the
+  // whole workshop (that's what Complete Overview is for).
+  const vehicles = useMemo(() => allVehicles.filter((v) => v.advisor_id === user.id), [allVehicles, user.id]);
+
+  const setFilter = (type, key) => {
+    setActiveFilter((prev) => (prev && prev.type === type && prev.key === key ? null : { type, key }));
+  };
+
+  const today = todayIST();
+  const isStuck = (v) => {
+    if (v.current_stage !== "pending") return false;
+    const ws = v.work_stages?.[0];
+    if (!ws) return true;
+    return !DEPT_KEYS.some((k) => ws[`${k}_status`] === "in_progress" || ws[`${k}_status`] === "on_hold");
+  };
+  const stats = useMemo(
+    () => ({
+      active: vehicles.filter((v) => v.current_stage !== "completed").length,
+      today: vehicles.filter((v) => v.entry_time && ovIstDateStr(v.entry_time) === today).length,
+      // Date-based (due today or earlier), not time-based like Overdue — a
+      // vehicle due at 6pm today belongs here even before 6pm, whereas
+      // Overdue only flags it once that exact moment has actually passed.
+      expectedToday: vehicles.filter(
+        (v) =>
+          v.expected_completion_time &&
+          ovIstDateStr(v.expected_completion_time) <= today &&
+          !["ready_for_exit", "completed"].includes(v.current_stage),
+      ).length,
+      overdue: vehicles.filter(
+        (v) =>
+          v.expected_completion_time &&
+          new Date(toZ(v.expected_completion_time)) < new Date() &&
+          !["ready_for_exit", "completed"].includes(v.current_stage),
+      ).length,
+      complaint: vehicles.filter((v) => (v.customer_complaints || []).some((c) => !c.resolved_note)).length,
+      stuck: vehicles.filter(isStuck).length,
+      warranty: vehicles.filter((v) => v.service_type === "warranty").length,
+    }),
+    [vehicles, today],
+  );
+
+  const filteredVehicles = useMemo(() => {
+    let result = vehicles;
+    if (activeFilter) {
+      const { type, key } = activeFilter;
+      if (type === "stat") {
+        if (key === "active") result = vehicles.filter((v) => v.current_stage !== "completed");
+        else if (key === "today") result = vehicles.filter((v) => v.entry_time && ovIstDateStr(v.entry_time) === today);
+        else if (key === "expectedToday")
+          result = vehicles.filter(
+            (v) =>
+              v.expected_completion_time &&
+              ovIstDateStr(v.expected_completion_time) <= today &&
+              !["ready_for_exit", "completed"].includes(v.current_stage),
+          );
+        else if (key === "overdue")
+          result = vehicles.filter(
+            (v) =>
+              v.expected_completion_time &&
+              new Date(toZ(v.expected_completion_time)) < new Date() &&
+              !["ready_for_exit", "completed"].includes(v.current_stage),
+          );
+        else if (key === "complaint") result = vehicles.filter((v) => (v.customer_complaints || []).some((c) => !c.resolved_note));
+        else if (key === "stuck") result = vehicles.filter(isStuck);
+        else if (key === "warranty") result = vehicles.filter((v) => v.service_type === "warranty");
+      } else if (type === "flow") {
+        result = vehicles.filter((v) => ovIsQueuedAt(v, key));
+      } else if (type === "dept") {
+        result = vehicles.filter((v) => ovDeptState(v, key) !== "not_assigned");
+      }
+    }
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      result = result.filter((v) => v.vehicle_number?.toLowerCase().includes(q) || v.customer_name?.toLowerCase().includes(q));
+    }
+    return [...result].sort((a, b) => {
+      const ta = a.entry_time ? new Date(a.entry_time).getTime() : 0;
+      const tb = b.entry_time ? new Date(b.entry_time).getTime() : 0;
+      return sortDir === "desc" ? tb - ta : ta - tb;
+    });
+  }, [vehicles, activeFilter, search, sortDir, today]);
+
+  return (
     <div>
-      <input
-        value={q}
-        onChange={(e) => setQ(e.target.value)}
-        placeholder="🔍 Search vehicle number or customer..."
-        style={{ ...inputStyle(false), width: 320, marginBottom: 16 }}
-      />
-      {filtered.length === 0 ? (
-        <Empty icon="🚗" text="No vehicles found" />
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 10, marginBottom: 12 }}>
+        <OvStatCard label="Active" value={stats.active} color={C.blue} active={activeFilter?.type === "stat" && activeFilter.key === "active"} onClick={() => setFilter("stat", "active")} />
+        <OvStatCard label="Today" value={stats.today} color={C.purple} active={activeFilter?.type === "stat" && activeFilter.key === "today"} onClick={() => setFilter("stat", "today")} />
+        <OvStatCard
+          label="Exp. Completion Today"
+          value={stats.expectedToday}
+          color={stats.expectedToday > 0 ? C.amber : C.green}
+          active={activeFilter?.type === "stat" && activeFilter.key === "expectedToday"}
+          onClick={() => setFilter("stat", "expectedToday")}
+        />
+        <OvStatCard
+          label="Overdue"
+          value={stats.overdue}
+          color={stats.overdue > 0 ? C.red : C.green}
+          active={activeFilter?.type === "stat" && activeFilter.key === "overdue"}
+          onClick={() => setFilter("stat", "overdue")}
+        />
+        <OvStatCard
+          label="Complaint"
+          value={stats.complaint}
+          color={stats.complaint > 0 ? C.amber : C.green}
+          active={activeFilter?.type === "stat" && activeFilter.key === "complaint"}
+          onClick={() => setFilter("stat", "complaint")}
+        />
+        <OvStatCard
+          label="Stuck"
+          value={stats.stuck}
+          color={stats.stuck > 0 ? C.red : C.green}
+          active={activeFilter?.type === "stat" && activeFilter.key === "stuck"}
+          onClick={() => setFilter("stat", "stuck")}
+        />
+        <OvStatCard
+          label="Warranty"
+          value={stats.warranty}
+          color={stats.warranty > 0 ? C.purple : C.textMuted}
+          active={activeFilter?.type === "stat" && activeFilter.key === "warranty"}
+          onClick={() => setFilter("stat", "warranty")}
+        />
+      </div>
+
+      <OvJourneyTracker stages={OV_JOURNEY_STAGES} vehicles={vehicles} activeFilter={activeFilter} onSelect={(key) => setFilter("flow", key)} onAdvisorClick={onOpenAssign} />
+      <OvDeptPanel vehicles={vehicles} deptHistory={deptHistory} activeFilter={activeFilter} onSelect={(key) => setFilter("dept", key)} />
+
+      <div style={{ display: "flex", gap: 10, marginBottom: 10, alignItems: "center", flexWrap: "wrap" }}>
+        <label style={{ fontSize: 12, fontWeight: 700, color: C.textSec }}>View</label>
+        <select value={view} onChange={(e) => setView(e.target.value)} style={ovSelectStyle}>
+          <option value="overall">Overall</option>
+          <option value="workshop">Workshop</option>
+        </select>
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="🔍 Search vehicle number or customer..."
+          style={{ ...inputStyle(false), width: 280 }}
+        />
+        <select value={sortDir} onChange={(e) => setSortDir(e.target.value)} style={ovSelectStyle}>
+          <option value="desc">Entry — newest first</option>
+          <option value="asc">Entry — oldest first</option>
+        </select>
+        {activeFilter && (
+          <button
+            onClick={() => setActiveFilter(null)}
+            style={{ padding: "7px 12px", borderRadius: 6, border: `1px solid ${C.border}`, background: C.surface, color: C.textSec, fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}
+          >
+            ✕ Clear filter
+          </button>
+        )}
+      </div>
+
+      <div style={{ display: "flex", gap: 18, alignItems: "center", flexWrap: "wrap", fontSize: 11, color: C.textSec, marginBottom: 10 }}>
+        {view === "overall" ? (
+          <>
+            <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <div style={{ width: 14, height: 14, borderRadius: "50%", background: C.green }} />
+              Stage complete
+            </span>
+            <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <div style={{ width: 14, height: 14, borderRadius: "50%", background: C.red }} />
+              Current stage
+            </span>
+            <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <div style={{ width: 14, height: 14, borderRadius: "50%", background: C.surface, border: `2px solid ${C.border}` }} />
+              Not yet reached
+            </span>
+          </>
+        ) : (
+          <>
+            <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <OvDeptDot state="not_assigned" size={14} />
+              Not assigned
+            </span>
+            <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <OvDeptDot state="not_started" size={14} />
+              Not started
+            </span>
+            <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <OvDeptDot state="in_progress" size={14} />
+              In progress
+            </span>
+            <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <OvDeptDot state="completed" size={14} />
+              Completed
+            </span>
+          </>
+        )}
+      </div>
+
+      <OvTimelineTable vehicles={filteredVehicles} advisorNameById={advisorNameById} view={view} stageColumns={OV_TABLE_STAGES} onDetails={onDetails} />
+    </div>
+  );
+}
+
+// ─── Complete Overview — the exact Owner Dashboard Overview experience (same
+// stage list, same six Row 1 cards, same Overall/Workshop table toggle),
+// unscoped to the whole workshop rather than an advisor's own timeline. ────
+function AdvisorCompleteOverview({ vehicles, advisorNameById, deptHistory, onDetails }) {
+  const [activeFilter, setActiveFilter] = useState(null);
+  const [search, setSearch] = useState("");
+  const [sortDir, setSortDir] = useState("desc");
+  const [view, setView] = useState("overall");
+
+  const setFilter = (type, key) => {
+    setActiveFilter((prev) => (prev && prev.type === type && prev.key === key ? null : { type, key }));
+  };
+
+  const today = todayIST();
+  const stats = useMemo(() => {
+    const active = vehicles.filter((v) => v.current_stage !== "completed");
+    const stuck = active.filter((v) => {
+      if (v.current_stage !== "pending") return false;
+      const ws = v.work_stages?.[0];
+      if (!ws) return true;
+      return !DEPT_KEYS.some((k) => ws[`${k}_status`] === "in_progress" || ws[`${k}_status`] === "on_hold");
+    });
+    return {
+      active: active.length,
+      today: vehicles.filter((v) => v.entry_time && ovIstDateStr(v.entry_time) === today).length,
+      // Date-based (due today or earlier), not time-based like Overdue — a
+      // vehicle due at 6pm today belongs here even before 6pm, whereas
+      // Overdue only flags it once that exact moment has actually passed.
+      expectedToday: vehicles.filter(
+        (v) =>
+          v.expected_completion_time &&
+          ovIstDateStr(v.expected_completion_time) <= today &&
+          !["ready_for_exit", "completed"].includes(v.current_stage),
+      ).length,
+      overdue: vehicles.filter(
+        (v) =>
+          v.expected_completion_time &&
+          new Date(toZ(v.expected_completion_time)) < new Date() &&
+          !["ready_for_exit", "completed"].includes(v.current_stage),
+      ).length,
+      complaint: vehicles.filter((v) => v.customer_complaints && v.customer_complaints.length > 0).length,
+      stuck: stuck.length,
+      warranty: vehicles.filter((v) => v.service_type === "warranty").length,
+    };
+  }, [vehicles, today]);
+
+  const filteredVehicles = useMemo(() => {
+    let result = vehicles;
+    if (activeFilter) {
+      const { type, key } = activeFilter;
+      if (type === "stat") {
+        if (key === "active") result = vehicles.filter((v) => v.current_stage !== "completed");
+        else if (key === "today") result = vehicles.filter((v) => v.entry_time && ovIstDateStr(v.entry_time) === today);
+        else if (key === "expectedToday")
+          result = vehicles.filter(
+            (v) =>
+              v.expected_completion_time &&
+              ovIstDateStr(v.expected_completion_time) <= today &&
+              !["ready_for_exit", "completed"].includes(v.current_stage),
+          );
+        else if (key === "overdue")
+          result = vehicles.filter(
+            (v) =>
+              v.expected_completion_time &&
+              new Date(toZ(v.expected_completion_time)) < new Date() &&
+              !["ready_for_exit", "completed"].includes(v.current_stage),
+          );
+        else if (key === "complaint") result = vehicles.filter((v) => v.customer_complaints && v.customer_complaints.length > 0);
+        else if (key === "stuck")
+          result = vehicles.filter((v) => {
+            if (v.current_stage !== "pending") return false;
+            const ws = v.work_stages?.[0];
+            if (!ws) return true;
+            return !DEPT_KEYS.some((k) => ws[`${k}_status`] === "in_progress" || ws[`${k}_status`] === "on_hold");
+          });
+        else if (key === "warranty") result = vehicles.filter((v) => v.service_type === "warranty");
+      } else if (type === "flow") {
+        result = vehicles.filter((v) => ovIsQueuedAt(v, key));
+      } else if (type === "dept") {
+        result = vehicles.filter((v) => ovDeptState(v, key) !== "not_assigned");
+      }
+    }
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      result = result.filter((v) => v.vehicle_number?.toLowerCase().includes(q) || v.customer_name?.toLowerCase().includes(q));
+    }
+    return [...result].sort((a, b) => {
+      const ta = a.entry_time ? new Date(a.entry_time).getTime() : 0;
+      const tb = b.entry_time ? new Date(b.entry_time).getTime() : 0;
+      return sortDir === "desc" ? tb - ta : ta - tb;
+    });
+  }, [vehicles, activeFilter, search, sortDir, today]);
+
+  return (
+    <div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 10, marginBottom: 12 }}>
+        <OvStatCard label="Active" value={stats.active} color={C.blue} active={activeFilter?.type === "stat" && activeFilter.key === "active"} onClick={() => setFilter("stat", "active")} />
+        <OvStatCard label="Today" value={stats.today} color={C.purple} active={activeFilter?.type === "stat" && activeFilter.key === "today"} onClick={() => setFilter("stat", "today")} />
+        <OvStatCard
+          label="Exp. Completion Today"
+          value={stats.expectedToday}
+          color={stats.expectedToday > 0 ? C.amber : C.green}
+          active={activeFilter?.type === "stat" && activeFilter.key === "expectedToday"}
+          onClick={() => setFilter("stat", "expectedToday")}
+        />
+        <OvStatCard
+          label="Overdue"
+          value={stats.overdue}
+          color={stats.overdue > 0 ? C.red : C.green}
+          active={activeFilter?.type === "stat" && activeFilter.key === "overdue"}
+          onClick={() => setFilter("stat", "overdue")}
+        />
+        <OvStatCard
+          label="Complaint"
+          value={stats.complaint}
+          color={stats.complaint > 0 ? C.amber : C.green}
+          active={activeFilter?.type === "stat" && activeFilter.key === "complaint"}
+          onClick={() => setFilter("stat", "complaint")}
+        />
+        <OvStatCard
+          label="Stuck"
+          value={stats.stuck}
+          color={stats.stuck > 0 ? C.red : C.green}
+          active={activeFilter?.type === "stat" && activeFilter.key === "stuck"}
+          onClick={() => setFilter("stat", "stuck")}
+        />
+        <OvStatCard
+          label="Warranty"
+          value={stats.warranty}
+          color={stats.warranty > 0 ? C.purple : C.textMuted}
+          active={activeFilter?.type === "stat" && activeFilter.key === "warranty"}
+          onClick={() => setFilter("stat", "warranty")}
+        />
+      </div>
+
+      <OvJourneyTracker stages={OV_FULL_FLOW_STAGES} vehicles={vehicles} activeFilter={activeFilter} onSelect={(key) => setFilter("flow", key)} />
+      <OvDeptPanel vehicles={vehicles} deptHistory={deptHistory} activeFilter={activeFilter} onSelect={(key) => setFilter("dept", key)} />
+
+      <div style={{ display: "flex", gap: 10, marginBottom: 10, alignItems: "center", flexWrap: "wrap" }}>
+        <label style={{ fontSize: 12, fontWeight: 700, color: C.textSec }}>View</label>
+        <select value={view} onChange={(e) => setView(e.target.value)} style={ovSelectStyle}>
+          <option value="overall">Overall</option>
+          <option value="workshop">Workshop</option>
+        </select>
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="🔍 Search vehicle number or customer..."
+          style={{ ...inputStyle(false), width: 280 }}
+        />
+        <select value={sortDir} onChange={(e) => setSortDir(e.target.value)} style={ovSelectStyle}>
+          <option value="desc">Entry — newest first</option>
+          <option value="asc">Entry — oldest first</option>
+        </select>
+        {activeFilter && (
+          <button
+            onClick={() => setActiveFilter(null)}
+            style={{ padding: "7px 12px", borderRadius: 6, border: `1px solid ${C.border}`, background: C.surface, color: C.textSec, fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}
+          >
+            ✕ Clear filter
+          </button>
+        )}
+      </div>
+
+      <div style={{ display: "flex", gap: 18, alignItems: "center", flexWrap: "wrap", fontSize: 11, color: C.textSec, marginBottom: 10 }}>
+        {view === "overall" ? (
+          <>
+            <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <div style={{ width: 14, height: 14, borderRadius: "50%", background: C.green }} />
+              Stage complete
+            </span>
+            <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <div style={{ width: 14, height: 14, borderRadius: "50%", background: C.red }} />
+              Current stage
+            </span>
+            <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <div style={{ width: 14, height: 14, borderRadius: "50%", background: C.surface, border: `2px solid ${C.border}` }} />
+              Not yet reached
+            </span>
+            <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <div style={{ width: 14, height: 14, borderRadius: "50%", background: C.amber }} />
+              Front checkup skipped
+            </span>
+          </>
+        ) : (
+          <>
+            <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <OvDeptDot state="not_assigned" size={14} />
+              Not assigned
+            </span>
+            <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <OvDeptDot state="not_started" size={14} />
+              Not started
+            </span>
+            <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <OvDeptDot state="in_progress" size={14} />
+              In progress
+            </span>
+            <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <OvDeptDot state="completed" size={14} />
+              Completed
+            </span>
+          </>
+        )}
+      </div>
+
+      <OvTimelineTable vehicles={filteredVehicles} advisorNameById={advisorNameById} view={view} stageColumns={OV_FULL_FLOW_STAGES} onDetails={onDetails} />
+    </div>
+  );
+}
+
+// ─── Overview root — Complete Overview / My Overview switcher. Complete
+// Overview is a literal port of Owner Dashboard's Overview tab (unscoped, six
+// stat cards, Entry→Exit); My Overview is the advisor-scoped version above. ─
+function AdvisorOverviewTab({ vehicles, users, user, onDetails, onOpenAssign }) {
+  const [mode, setMode] = useState("my"); // my | complete
+  const [deptHistory, setDeptHistory] = useState(null);
+
+  const advisorNameById = useMemo(() => new Map(users.map((u) => [u.id, u.full_name])), [users]);
+
+  // Same vehicle_history lookup Owner's Overview uses for "done today" per
+  // department — work_stages has no {dept}_completed_at column. Fetched once
+  // here and shared by both My Overview and Complete Overview.
+  useEffect(() => {
+    const ids = vehicles.map((v) => v.id);
+    if (ids.length === 0) {
+      setDeptHistory({});
+      return;
+    }
+    let cancelled = false;
+    withTimeout(
+      supabase
+        .from("vehicle_history")
+        .select("vehicle_id, stage, action, created_at")
+        .in("vehicle_id", ids)
+        .in("stage", DEPT_KEYS)
+        .in("action", ["work_completed", "force_completed"])
+        .order("created_at", { ascending: false }),
+    )
+      .then(({ data, error }) => {
+        if (error) throw error;
+        if (cancelled) return;
+        const map = {};
+        (data || []).forEach((row) => {
+          if (!map[row.vehicle_id]) map[row.vehicle_id] = {};
+          if (!map[row.vehicle_id][row.stage]) map[row.vehicle_id][row.stage] = row.created_at;
+        });
+        setDeptHistory(map);
+      })
+      .catch((e) => {
+        console.error("Advisor overview dept history fetch error:", e);
+        if (!cancelled) setDeptHistory({});
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [vehicles]);
+
+  return (
+    <div>
+      <style>{OV_PULSE_KEYFRAMES}</style>
+      <div style={{ display: "inline-flex", background: C.raised, border: `1px solid ${C.border}`, borderRadius: 9, padding: 3, gap: 2, marginBottom: 16 }}>
+        {[
+          ["my", "My Overview"],
+          ["complete", "Complete Overview"],
+        ].map(([k, l]) => {
+          const active = mode === k;
+          return (
+            <button
+              key={k}
+              type="button"
+              onClick={() => setMode(k)}
+              style={{
+                appearance: "none",
+                border: "none",
+                cursor: "pointer",
+                fontFamily: "inherit",
+                fontSize: 12.5,
+                fontWeight: 700,
+                padding: "7px 16px",
+                borderRadius: 7,
+                background: active ? C.surface : "transparent",
+                color: active ? C.text : C.textSec,
+                boxShadow: active ? C.shadow : "none",
+                transition: "all 0.12s",
+              }}
+            >
+              {l}
+            </button>
+          );
+        })}
+      </div>
+
+      {mode === "my" ? (
+        <AdvisorMyOverview vehicles={vehicles} user={user} advisorNameById={advisorNameById} deptHistory={deptHistory} onDetails={onDetails} onOpenAssign={onOpenAssign} />
       ) : (
-        <div style={{ display: "grid", gap: 8 }}>
-          {filtered.map((v) => (
-            <VehicleListItem
-              key={v.id}
-              vehicle={v}
-              stageLabel={PIPELINE_STAGE_LABELS[v.current_stage] || (v.current_stage || "").replace(/_/g, " ")}
-              onPress={() => onDetails(v)}
-            />
-          ))}
-        </div>
+        <AdvisorCompleteOverview vehicles={vehicles} advisorNameById={advisorNameById} deptHistory={deptHistory} onDetails={onDetails} />
       )}
     </div>
   );
@@ -2165,8 +3101,8 @@ function AssignWorkModal({ vehicle, user, teams, vehicles, washingSlots, vehicle
     priority: vehicle.priority || "normal",
     is_offline_jobcard: vehicle.is_offline_jobcard || false,
     offline_jobcard_date: vehicle.offline_jobcard_open_date || todayIST(),
-    expected_date: vehicle.expected_completion_time ? vehicle.expected_completion_time.slice(0, 10) : todayIST(),
-    expected_time: vehicle.expected_completion_time ? vehicle.expected_completion_time.slice(11, 16) : "18:00",
+    expected_date: utcISOToISTWall(vehicle.expected_completion_time)?.date || todayIST(),
+    expected_time: utcISOToISTWall(vehicle.expected_completion_time)?.time || "18:00",
     service_type: vehicle.service_type || "",
   });
   const [complaints, setComplaints] = useState(
@@ -2279,7 +3215,7 @@ function AssignWorkModal({ vehicle, user, teams, vehicles, washingSlots, vehicle
       if (f.customer_name !== vehicle.customer_name) changed.push(`customer_name: "${vehicle.customer_name || "—"}" → "${f.customer_name}"`);
       if (f.customer_phone !== vehicle.customer_phone) changed.push(`customer_phone: "${vehicle.customer_phone || "—"}" → "${f.customer_phone}"`);
 
-      const expectedISO = f.expected_date && f.expected_time ? `${f.expected_date}T${f.expected_time}:00` : null;
+      const expectedISO = istWallToUTCISO(f.expected_date, f.expected_time);
 
       const { error: vErr } = await supabase
         .from("vehicles")
@@ -3599,17 +4535,18 @@ function VehicleDetailsModal({ vehicle, users, onClose, onEdit, onDelete, onForc
 
 // ─── Main dashboard ─────────────────────────────────────────────────────────
 const TABS = [
+  { key: "overview", label: "Overview", icon: "📊" },
   { key: "assign", label: "Assign", icon: "📝" },
   { key: "pdi", label: "PDI", icon: "🔍" },
   { key: "departments", label: "Departments", icon: "🔧" },
   { key: "washing", label: "Washing", icon: "💧" },
   { key: "bookings", label: "Bookings", icon: "🗓" },
-  { key: "all", label: "All Vehicles", icon: "🚗" },
   { key: "offline", label: "Offline Job Cards", icon: "📄" },
 ];
 
 export default function AdvisorDashboard({ user, onLogout }) {
-  const [tab, setTab] = useState("assign");
+  const [tab, setTab] = useState("overview");
+  const [collapsed, setCollapsed] = useState(false);
   const [vehicles, setVehicles] = useState([]);
   const [bookings, setBookings] = useState([]);
   const [users, setUsers] = useState([]);
@@ -3725,23 +4662,22 @@ export default function AdvisorDashboard({ user, onLogout }) {
     fetchData(false);
   };
 
+  // Only feeds the sidebar nav badges now — the old top quick-stats grid
+  // (In Progress / No Wash Slot) is gone; those live in the Overview tab's
+  // own stat cards instead, same as Owner Dashboard's pattern.
   const stats = useMemo(() => {
     const toAssign = vehicles.filter((v) => v.current_stage === "advisor_review").length;
     const pdiReady = vehicles.filter((v) => v.current_stage === "pdi" && v.advisor_id === user.id).length;
-    const inProgress = vehicles.filter((v) => v.current_stage === "pending").length;
-    const noSlot = vehicles.filter(
-      (v) => v.work_stages?.[0]?.washing_required && (!v.washing_details?.[0]?.slot || !v.washing_details?.[0]?.slot_date),
-    ).length;
-    return { toAssign, pdiReady, inProgress, noSlot };
+    return { toAssign, pdiReady };
   }, [vehicles, user.id]);
 
   const tabCounts = {
+    overview: null,
     assign: stats.toAssign,
     pdi: stats.pdiReady,
     departments: vehicles.filter((v) => v.current_stage === "pending").length,
     washing: vehicles.filter((v) => v.work_stages?.[0]?.washing_required && v.work_stages[0].washing_status !== "completed").length,
     bookings: bookings.filter((b) => b.status === "pending").length,
-    all: null,
     offline: vehicles.filter((v) => v.is_offline_jobcard && !v.offline_jobcard_opened).length,
   };
 
@@ -3774,95 +4710,138 @@ export default function AdvisorDashboard({ user, onLogout }) {
     );
 
   return (
-    <div style={{ minHeight: "100vh", backgroundColor: C.bg, fontFamily: "'DM Sans',sans-serif", color: C.text }}>
+    <div style={{ display: "flex", height: "100vh", overflow: "hidden", background: C.bg, fontFamily: "'DM Sans',sans-serif", color: C.text }}>
       <style>
         {FONT}
-        {`*{box-sizing:border-box;} ::-webkit-scrollbar{width:5px;} ::-webkit-scrollbar-thumb{background:${C.border};border-radius:3px;}`}
+        {`*{box-sizing:border-box;} ::-webkit-scrollbar{width:5px;height:5px;} ::-webkit-scrollbar-thumb{background:${C.border};border-radius:3px;}`}
       </style>
 
-      {/* Header */}
-      <div style={{ background: C.navy, padding: "0 32px", height: 64, display: "flex", justifyContent: "space-between", alignItems: "center", position: "sticky", top: 0, zIndex: 50, boxShadow: "0 2px 8px rgba(0,0,0,0.25)" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <div style={{ width: 36, height: 36, background: C.sky, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 900, color: "#fff", fontSize: 15 }}>
+      {/* Sidebar */}
+      <div
+        style={{
+          width: collapsed ? 60 : 216,
+          background: C.navy,
+          display: "flex",
+          flexDirection: "column",
+          flexShrink: 0,
+          transition: "width 0.2s",
+          overflow: "hidden",
+          height: "100vh",
+          zIndex: 100,
+        }}
+      >
+        <div style={{ padding: collapsed ? "16px 12px" : "16px 14px", borderBottom: `1px solid ${C.navyMid}`, display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ width: 36, height: 36, background: C.sky, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 900, color: "#fff", fontSize: 15, flexShrink: 0 }}>
             S
           </div>
-          <div>
-            <div style={{ fontSize: 10, fontWeight: 800, color: "rgba(255,255,255,0.45)", textTransform: "uppercase", letterSpacing: "1.5px" }}>
-              Sheetal Automobiles
+          {!collapsed && (
+            <div>
+              <div style={{ fontSize: 9.5, fontWeight: 800, color: "rgba(255,255,255,0.45)", textTransform: "uppercase", letterSpacing: "1.2px" }}>
+                Sheetal Automobiles
+              </div>
+              <div style={{ fontSize: 14, fontWeight: 800, color: "#fff" }}>Advisor</div>
             </div>
-            <div style={{ fontSize: 16, fontWeight: 800, color: "#fff" }}>Advisor Dashboard</div>
-          </div>
+          )}
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-          <span style={{ fontSize: 13, color: "rgba(255,255,255,0.7)", fontWeight: 600 }}>👤 {user?.full_name}</span>
-          <button
+        <nav style={{ flex: 1, padding: "8px 5px", overflowY: "auto" }}>
+          {TABS.map((t) => {
+            const a = tab === t.key;
+            const count = tabCounts[t.key];
+            return (
+              <div
+                key={t.key}
+                onClick={() => setTab(t.key)}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 9,
+                  padding: collapsed ? "9px 13px" : "9px 11px",
+                  borderRadius: 7,
+                  cursor: "pointer",
+                  marginBottom: 2,
+                  background: a ? "rgba(14,165,233,0.18)" : "transparent",
+                  borderLeft: a ? `3px solid ${C.sky}` : "3px solid transparent",
+                  transition: "all 0.12s",
+                }}
+                onMouseEnter={(e) => {
+                  if (!a) e.currentTarget.style.background = C.navyMid;
+                }}
+                onMouseLeave={(e) => {
+                  if (!a) e.currentTarget.style.background = "transparent";
+                }}
+              >
+                <span style={{ fontSize: 16, flexShrink: 0 }}>{t.icon}</span>
+                {!collapsed && (
+                  <span style={{ fontSize: 13, fontWeight: a ? 700 : 500, color: a ? C.sky : "#94a3b8", flex: 1 }}>
+                    {t.label}
+                  </span>
+                )}
+                {!collapsed && count > 0 && (
+                  <span style={{ background: C.red, color: "#fff", borderRadius: 10, padding: "1px 6px", fontSize: 10, fontWeight: 800, flexShrink: 0 }}>
+                    {count}
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </nav>
+        <div style={{ padding: "8px 5px", borderTop: `1px solid ${C.navyMid}` }}>
+          <div
             onClick={() => setShowLeaveModal(true)}
-            style={{ padding: "6px 14px", background: "rgba(255,255,255,0.1)", color: "#fff", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 7, cursor: "pointer", fontSize: 13, fontWeight: 700, fontFamily: "inherit" }}
+            style={{ display: "flex", alignItems: "center", gap: 9, padding: "8px 11px", borderRadius: 7, cursor: "pointer" }}
+            onMouseEnter={(e) => (e.currentTarget.style.background = C.navyMid)}
+            onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
           >
-            🌴 Leave
-          </button>
-          <button
-            onClick={() => fetchData()}
-            style={{ padding: "6px 14px", background: "rgba(255,255,255,0.1)", color: "#fff", border: "1px solid rgba(255,255,255,0.2)", borderRadius: 7, cursor: "pointer", fontSize: 13, fontWeight: 700, fontFamily: "inherit" }}
+            <span style={{ fontSize: 14, flexShrink: 0 }}>🌴</span>
+            {!collapsed && <span style={{ fontSize: 13, fontWeight: 500, color: "#94a3b8" }}>Leave</span>}
+          </div>
+          <div
+            onClick={() => setCollapsed(!collapsed)}
+            style={{ display: "flex", alignItems: "center", gap: 9, padding: "8px 11px", borderRadius: 7, cursor: "pointer" }}
+            onMouseEnter={(e) => (e.currentTarget.style.background = C.navyMid)}
+            onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
           >
-            🔄 Refresh
-          </button>
-          <button
+            <span style={{ fontSize: 13, flexShrink: 0, color: "#64748b" }}>{collapsed ? "→" : "←"}</span>
+            {!collapsed && <span style={{ fontSize: 12, color: "#64748b" }}>Collapse</span>}
+          </div>
+          <div
             onClick={onLogout}
-            style={{ padding: "6px 14px", background: "rgba(239,68,68,0.15)", color: "#F87171", border: "1px solid rgba(239,68,68,0.3)", borderRadius: 7, cursor: "pointer", fontSize: 13, fontWeight: 700, fontFamily: "inherit" }}
+            style={{ display: "flex", alignItems: "center", gap: 9, padding: "8px 11px", borderRadius: 7, cursor: "pointer" }}
+            onMouseEnter={(e) => (e.currentTarget.style.background = C.navyMid)}
+            onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
           >
-            Logout
-          </button>
+            <span style={{ fontSize: 14, flexShrink: 0 }}>🚪</span>
+            {!collapsed && <span style={{ fontSize: 13, fontWeight: 500, color: "#f87171" }}>Logout</span>}
+          </div>
         </div>
       </div>
 
-      <div style={{ padding: "28px 32px", maxWidth: 1200, margin: "0 auto" }}>
-        {/* Quick stats */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14, marginBottom: 24 }}>
-          {[
-            { label: "To Assign", value: stats.toAssign, color: C.sky, icon: "📝" },
-            { label: "PDI Ready", value: stats.pdiReady, color: C.purple, icon: "🔍" },
-            { label: "In Progress", value: stats.inProgress, color: C.amber, icon: "🔧" },
-            { label: "No Wash Slot", value: stats.noSlot, color: stats.noSlot > 0 ? C.red : C.green, icon: "💧" },
-          ].map((s) => (
-            <div key={s.label} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, padding: "16px 18px", boxShadow: C.shadow }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5 }}>
-                <span style={{ fontSize: 10, fontWeight: 700, color: C.textMuted, textTransform: "uppercase", letterSpacing: "0.5px" }}>{s.label}</span>
-                <span style={{ fontSize: 18 }}>{s.icon}</span>
-              </div>
-              <div style={{ fontSize: 26, fontWeight: 800, color: s.color, fontFamily: "'DM Mono',monospace" }}>{s.value}</div>
-            </div>
-          ))}
-        </div>
-
-        {/* Tab bar */}
-        <div style={{ display: "flex", gap: 4, backgroundColor: C.surface, padding: 6, borderRadius: 12, boxShadow: C.shadow, marginBottom: 24, width: "fit-content", flexWrap: "wrap", border: `1px solid ${C.border}` }}>
-          {TABS.map((t) => (
+      {/* Main */}
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
+        <div
+          style={{
+            background: C.surface,
+            borderBottom: `1px solid ${C.border}`,
+            padding: "10px 24px",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            flexShrink: 0,
+          }}
+        >
+          <span style={{ fontSize: 15, fontWeight: 800, color: C.text }}>{TABS.find((t) => t.key === tab)?.label || "Advisor"}</span>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <span style={{ fontSize: 13, color: C.textSec, fontWeight: 600 }}>👤 {user?.full_name}</span>
             <button
-              key={t.key}
-              onClick={() => setTab(t.key)}
-              style={{
-                padding: "9px 16px",
-                border: "none",
-                borderRadius: 8,
-                cursor: "pointer",
-                fontWeight: 600,
-                fontSize: 13,
-                fontFamily: "inherit",
-                backgroundColor: tab === t.key ? C.navy : "transparent",
-                color: tab === t.key ? "#fff" : C.textMuted,
-              }}
+              onClick={() => fetchData()}
+              style={{ padding: "6px 14px", background: C.raised, color: C.textSec, border: `1px solid ${C.border}`, borderRadius: 7, cursor: "pointer", fontSize: 13, fontWeight: 700, fontFamily: "inherit" }}
             >
-              {t.icon} {t.label}
-              {tabCounts[t.key] !== null && tabCounts[t.key] > 0 && (
-                <span style={{ marginLeft: 7, backgroundColor: tab === t.key ? "rgba(255,255,255,0.2)" : C.raised, color: tab === t.key ? "#fff" : C.textSec, borderRadius: 12, padding: "1px 7px", fontSize: 11 }}>
-                  {tabCounts[t.key]}
-                </span>
-              )}
+              🔄 Refresh
             </button>
-          ))}
+          </div>
         </div>
 
+        <div style={{ flex: 1, overflowY: "auto", padding: "24px 28px" }}>
         {/* Tab content */}
         {tab === "assign" && (
           <AssignTab
@@ -3941,16 +4920,20 @@ export default function AdvisorDashboard({ user, onLogout }) {
             }}
           />
         )}
-        {tab === "all" && (
-          <AllVehiclesTab
+        {tab === "overview" && (
+          <AdvisorOverviewTab
             vehicles={vehicles}
+            users={users}
+            user={user}
             onDetails={(v) => {
               setSelectedVehicle(v);
               setModal("details");
             }}
+            onOpenAssign={() => setTab("assign")}
           />
         )}
         {tab === "offline" && <OfflineJobCardsTab vehicles={vehicles} onRefresh={() => fetchData(false)} />}
+        </div>
       </div>
 
       {/* Modals */}

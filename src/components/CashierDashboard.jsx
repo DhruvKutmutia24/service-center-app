@@ -595,9 +595,17 @@ function PaymentFormModal({ vehicle, user, onClose, onSuccess }) {
         .insert(paymentRows);
       if (pErr) throw pErr;
 
-      // Smart routing: if in payment → ready_for_exit; else stay
+      // Smart routing: once a bill exists and payment is collected, the
+      // vehicle is clear to exit — whether the bill came from Billing's own
+      // "Generate Bill" (which already moved billing → payment) or from a
+      // cashier override on a vehicle that was sitting at "billing" with no
+      // bill yet (override sets bill_amount but deliberately leaves
+      // current_stage untouched — see CashierBillOverrideModal). Checking
+      // only for "payment" here left override-paid "billing"-stage vehicles
+      // stuck forever: invisible to Billing (bill_amount already set,
+      // payment_status already "paid") and never advancing toward exit.
       const nextStage =
-        vehicle.current_stage === "payment"
+        vehicle.current_stage === "payment" || vehicle.current_stage === "billing"
           ? "ready_for_exit"
           : vehicle.current_stage;
       const { error: vErr } = await supabase
@@ -1085,7 +1093,7 @@ function PaymentFormModal({ vehicle, user, onClose, onSuccess }) {
                 ? [["Discount", fmtINR(discountAmount)]]
                 : []),
               ...(hasAnyCredit ? [["Guaranteed by", guaranteedBy]] : []),
-              ...(vehicle.current_stage === "payment"
+              ...(vehicle.current_stage === "payment" || vehicle.current_stage === "billing"
                 ? [["Action", "Vehicle → Ready for Exit"]]
                 : [["Action", "Bill saved (vehicle stays in current stage)"]]),
             ].map(([label, val]) => (
@@ -1361,11 +1369,25 @@ function CreditCollectionModal({ group, user, onClose, onSuccess }) {
         const newPaid =
           Math.round(((parseFloat(visit.total_paid) || 0) + deduct) * 100) /
           100;
+        const fullyCleared = newCredit <= 0.01;
+        // Same smart routing as the initial payment collection (see
+        // PaymentFormModal): once a visit is fully settled, it's clear to
+        // exit if it was just waiting on billing/payment — clearing the last
+        // of the credit here is functionally the same event, just collected
+        // later. Without this, a visit paid off entirely via credit
+        // collection stayed stuck at "payment"/"billing" forever, invisible
+        // everywhere except this credit ledger (confirmed on real data).
+        const nextStage =
+          fullyCleared &&
+          (visit.current_stage === "payment" || visit.current_stage === "billing")
+            ? "ready_for_exit"
+            : visit.current_stage;
         updates.push({
           id: visit.id,
           credit_amount: newCredit,
           total_paid: newPaid,
-          payment_status: newCredit <= 0.01 ? "paid" : "partial",
+          payment_status: fullyCleared ? "paid" : "partial",
+          current_stage: nextStage,
         });
         remaining = Math.round((remaining - deduct) * 100) / 100;
       }
@@ -1395,6 +1417,7 @@ function CreditCollectionModal({ group, user, onClose, onSuccess }) {
             credit_amount: u.credit_amount,
             total_paid: u.total_paid,
             payment_status: u.payment_status,
+            current_stage: u.current_stage,
           })
           .eq("id", u.id);
         if (vErr) throw vErr;
@@ -2303,6 +2326,9 @@ function VehiclePaymentCard({ vehicle, onPayment, onDetails }) {
 
 // ─── Tab: Vehicles (merged "At Cashier" + "Other Vehicles") ───────────────────
 const PIPELINE_STAGE_LABELS = {
+  payment: "💳 Payment",
+  ready_for_exit: "🚪 Ready for Exit",
+  completed: "✅ Completed",
   billing: "🧾 Billing",
   pdi: "🔍 PDI",
   washing: "💧 Washing",
@@ -2329,6 +2355,9 @@ const PIPELINE_STAGE_ORDER = [
   "advisor_review",
   "front_checkup",
   "pending",
+  "payment",
+  "ready_for_exit",
+  "completed",
 ];
 
 function VehiclesTab({
@@ -2339,7 +2368,7 @@ function VehiclesTab({
   onOverridePay,
 }) {
   const [search, setSearch] = useState("");
-  const [otherExpanded, setOtherExpanded] = useState(false);
+  const [otherExpanded, setOtherExpanded] = useState(true);
 
   const matchesSearch = (v) => {
     if (!search.trim()) return true;
@@ -3469,14 +3498,14 @@ function CashierDashboard({ user, onLogout }) {
             .is("deleted_at", null)
             .order("entry_time", { ascending: false }),
 
-          // ② Pipeline — all active (not payment/exit/completed)
+          // ② Pipeline — every vehicle in the system, gate-in onward: active
+          // regardless of stage, plus anything (even already paid/exited) that
+          // entered today, so the cashier can still find/search it.
           supabase
             .from("vehicles")
             .select("*")
-            .not(
-              "current_stage",
-              "in",
-              '("payment","ready_for_exit","completed")',
+            .or(
+              `and(current_stage.neq.payment,current_stage.neq.ready_for_exit,current_stage.neq.completed),entry_time.gte.${todayStartUTC}`,
             )
             .is("deleted_at", null)
             .order("entry_time", { ascending: false }),
@@ -3485,7 +3514,7 @@ function CashierDashboard({ user, onLogout }) {
           supabase
             .from("vehicles")
             .select(
-              "id,vehicle_number,customer_name,customer_phone,bill_amount,total_paid,credit_amount,credit_guaranteed_by,entry_time,updated_at,payment_status",
+              "id,vehicle_number,customer_name,customer_phone,bill_amount,total_paid,credit_amount,credit_guaranteed_by,entry_time,updated_at,payment_status,current_stage",
             )
             .gt("credit_amount", 0)
             .is("deleted_at", null),
