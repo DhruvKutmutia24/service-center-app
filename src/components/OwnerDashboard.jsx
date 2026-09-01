@@ -1290,7 +1290,6 @@ async function exportToExcel(reportType, fromDate, toDate) {
       .select(
         "*,vehicle:vehicles!payments_vehicle_id_fkey(vehicle_number,customer_name),collector:users!payments_collected_by_fkey(full_name)",
       )
-      .is("voided_at", null)
       .gte("created_at", f0)
       .lte("created_at", t0)
       .order("created_at", { ascending: false });
@@ -15680,7 +15679,6 @@ function OwnerDashboard({ user, onLogout }) {
             .select(
               "*,vehicle:vehicles!payments_vehicle_id_fkey(vehicle_number,customer_name,model,credit_guaranteed_by),collector:users!payments_collected_by_fkey(full_name)",
             )
-            .is("voided_at", null)
             .gte("created_at", ts)
             .order("created_at", { ascending: false }),
           supabase
@@ -15688,7 +15686,6 @@ function OwnerDashboard({ user, onLogout }) {
             .select(
               "*,vehicle:vehicles!payments_vehicle_id_fkey(vehicle_number,customer_name,model,credit_guaranteed_by),collector:users!payments_collected_by_fkey(full_name)",
             )
-            .is("voided_at", null)
             .order("created_at", { ascending: false }),
           supabase
             .from("vehicles")
@@ -15774,7 +15771,6 @@ function OwnerDashboard({ user, onLogout }) {
           .select(
             "*,vehicle:vehicles!payments_vehicle_id_fkey(vehicle_number,customer_name)",
           )
-          .is("voided_at", null)
           .gte("created_at", f0)
           .lte("created_at", t0)
           .order("created_at", { ascending: false }),
