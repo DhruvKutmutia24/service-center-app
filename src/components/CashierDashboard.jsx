@@ -1627,6 +1627,7 @@ function CreditStatementModal({ group, onClose }) {
       const { data: payments } = await supabase
         .from("payments")
         .select("*, collector:users!payments_collected_by_fkey(full_name)")
+        .is("voided_at", null)
         .in("vehicle_id", ids)
         .order("created_at", { ascending: true });
       const statement = [];
@@ -1973,6 +1974,7 @@ function VehicleDetailsModal({ vehicle, onClose, onPayment }) {
       supabase
         .from("payments")
         .select("*, collector:users!payments_collected_by_fkey(full_name)")
+        .is("voided_at", null)
         .eq("vehicle_id", vehicle.id)
         .order("created_at", { ascending: false }),
     ]).then(([h, p]) => {
@@ -3523,6 +3525,7 @@ function CashierDashboard({ user, onLogout }) {
           supabase
             .from("payments")
             .select("*")
+            .is("voided_at", null)
             .gte("created_at", todayStartUTC)
             .neq("payment_method", "credit"),
 
@@ -3532,6 +3535,7 @@ function CashierDashboard({ user, onLogout }) {
             .select(
               "*, vehicle:vehicles!payments_vehicle_id_fkey(vehicle_number,customer_name,customer_phone,model,credit_guaranteed_by), collector:users!payments_collected_by_fkey(full_name)",
             )
+            .is("voided_at", null)
             .order("created_at", { ascending: false }),
         ]));
 

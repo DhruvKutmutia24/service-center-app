@@ -2220,7 +2220,7 @@ const StatusBadge = ({ status }) => {
 };
 
 // ─── AdvisorBookingCard ─────────────────────────────────────────────────────
-function AdvisorBookingCard({ booking, visitCount, onConfirm, onReschedule, onEdit, onCancel }) {
+function AdvisorBookingCard({ booking, visitCount, isRevisit, onConfirm, onReschedule, onEdit, onCancel }) {
   const { ref, filledBy } = parseContactPerson(booking.contact_person);
   return (
     <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, padding: "14px 18px", boxShadow: C.shadow }}>
@@ -2235,6 +2235,14 @@ function AdvisorBookingCard({ booking, visitCount, onConfirm, onReschedule, onEd
             {visitCount > 1 && (
               <Chip color={C.cyan} bg={C.cyanLight}>
                 {ordinal(visitCount)} visit
+              </Chip>
+            )}
+            {/* Known before the vehicle ever arrives — same recentVisitNums
+                match (vehicle_number completed in the last 30 days) AssignTab
+                already uses at intake, just surfaced earlier at booking time. */}
+            {isRevisit && (
+              <Chip color={C.cyan} bg={C.cyanLight}>
+                🔁 Revisit
               </Chip>
             )}
           </div>
@@ -2282,7 +2290,7 @@ function AdvisorBookingCard({ booking, visitCount, onConfirm, onReschedule, onEd
 }
 
 // ─── AdvisorBookingsTab ─────────────────────────────────────────────────────
-function AdvisorBookingsTab({ bookings, user, visitCounts, onConfirm, onReschedule, onEdit, onCancel }) {
+function AdvisorBookingsTab({ bookings, user, visitCounts, recentVisitNums, onConfirm, onReschedule, onEdit, onCancel }) {
   const [sub, setSub] = useState("enquiry");
   const [date, setDate] = useState(todayIST());
 
@@ -2364,6 +2372,7 @@ function AdvisorBookingsTab({ bookings, user, visitCounts, onConfirm, onReschedu
               key={b.id}
               booking={b}
               visitCount={visitCounts[b.vehicle_number] || 1}
+              isRevisit={recentVisitNums?.has(b.vehicle_number)}
               onConfirm={onConfirm}
               onReschedule={onReschedule}
               onEdit={onEdit}
@@ -2469,47 +2478,33 @@ function AdvisorBookingRescheduleModal({ booking, user, onClose, onSuccess }) {
 
   const save = async () => {
     if (!newDate) return;
+    if (!notes.trim()) {
+      setErr("A reason is required to reschedule a booking");
+      return;
+    }
     setErr("");
     setLoading(true);
     try {
-      const ist = new Date(Date.now() + 5.5 * 3600000);
-      const newRef = `BK-${ist.getUTCFullYear()}${String(ist.getUTCMonth() + 1).padStart(2, "0")}${String(ist.getUTCDate()).padStart(2, "0")}-${String(Math.floor(1000 + Math.random() * 9000))}`;
+      // Reschedule goes through the reschedule_booking RPC — one atomic DB
+      // transaction that inserts the new booking row (with its own
+      // ref_number and rescheduled_from link), freezes the old row's status
+      // to "rescheduled" without touching its preferred_date, and writes the
+      // audit-log entry. This replaced a client-side insert-then-update pair
+      // that (a) generated ref_number via Math.random() with no DB
+      // uniqueness constraint, (b) could leave two live bookings if the
+      // second call failed after the first succeeded, and (c) never carried
+      // over vehicle_id/assigned_advisor_id to the new row. Do not go back
+      // to manual insert+update here — mobile (tata-motors-mobile
+      // app/advisor.js) was fixed the same way and both must stay in sync.
+      const { data, error } = await supabase.rpc("reschedule_booking", {
+        p_booking_id: booking.id,
+        p_new_date: newDate,
+        p_new_time: newTime || null,
+        p_reason: notes.trim(),
+      });
+      if (error) throw error;
 
-      const { error: insertErr } = await supabase.from("bookings").insert([
-        {
-          vehicle_number: booking.vehicle_number,
-          customer_name: booking.customer_name,
-          customer_phone: booking.customer_phone || null,
-          model: booking.model || null,
-          service_type: booking.service_type || null,
-          issue_description: booking.issue_description || null,
-          preferred_date: newDate,
-          preferred_time: newTime || null,
-          contact_person: booking.contact_person || null,
-          odometer_reading: booking.odometer_reading || null,
-          ref_number: newRef,
-          status: "pending",
-          rescheduled_from: booking.id,
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        },
-      ]);
-      if (insertErr) throw insertErr;
-
-      const { error: updateErr } = await supabase
-        .from("bookings")
-        .update({ status: "rescheduled", updated_at: new Date().toISOString() })
-        .eq("id", booking.id);
-      if (updateErr) throw updateErr;
-
-      await logBookingActivity(
-        booking.id,
-        user.id,
-        "rescheduled",
-        notes || `Rescheduled to ${fmtDateFull(newDate)}. New ref: ${newRef}`,
-        { old_date: booking.preferred_date, new_date: newDate },
-      );
-
+      const newRef = data?.new_ref_number || booking.ref_number;
       if (booking.customer_phone) {
         await sendWA(booking.customer_phone, "booking_rescheduled", [
           booking.customer_name || "Customer",
@@ -2547,8 +2542,8 @@ function AdvisorBookingRescheduleModal({ booking, user, onClose, onSuccess }) {
         </div>
       </div>
       <div style={{ marginBottom: 16 }}>
-        <FieldLabel>Notes (optional)</FieldLabel>
-        <StyledInput as="textarea" rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Reason for reschedule..." />
+        <FieldLabel required>Reason for Rescheduling</FieldLabel>
+        <StyledInput as="textarea" rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="e.g. Customer requested reschedule — traveling" />
       </div>
       {err && (
         <div style={{ background: C.redLight, color: C.red, padding: "8px 12px", borderRadius: 8, marginBottom: 12, fontSize: 13 }}>{err}</div>
@@ -2569,9 +2564,14 @@ function AdvisorBookingEditModal({ booking, user, onClose, onSuccess }) {
     customer_phone: booking.customer_phone || "",
     service_type: booking.service_type || "",
     issue_description: booking.issue_description || "",
-    preferred_date: booking.preferred_date || "",
+    // preferred_date is intentionally not part of this form — see the
+    // read-only field below. Changing it must go through
+    // AdvisorBookingRescheduleModal (reschedule_booking RPC), which creates
+    // a new booking number and freezes this one instead of silently
+    // mutating its date in place with no audit trail.
     preferred_time: booking.preferred_time || "",
   });
+  const [editReason, setEditReason] = useState("");
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
   const upd = (k, v) => setF((p) => ({ ...p, [k]: v }));
@@ -2580,6 +2580,7 @@ function AdvisorBookingEditModal({ booking, user, onClose, onSuccess }) {
     setErr("");
     const phoneErr = validatePhone(f.customer_phone);
     if (phoneErr) return setErr(phoneErr);
+    if (!editReason.trim()) return setErr("A reason is required to edit this booking");
     setLoading(true);
     try {
       const diffs = Object.entries(f)
@@ -2590,9 +2591,12 @@ function AdvisorBookingEditModal({ booking, user, onClose, onSuccess }) {
         .update({ ...f, updated_at: new Date().toISOString() })
         .eq("id", booking.id);
       if (error) throw error;
-      if (diffs.length > 0) {
-        await logBookingActivity(booking.id, user.id, "edited", diffs.join("; "));
-      }
+      await logBookingActivity(
+        booking.id,
+        user.id,
+        "edited",
+        `${diffs.length > 0 ? diffs.join("; ") : "Booking details updated"} — Reason: ${editReason.trim()}`,
+      );
       onSuccess();
     } catch (e) {
       setErr(e.message || "Failed to save changes");
@@ -2638,15 +2642,22 @@ function AdvisorBookingEditModal({ booking, user, onClose, onSuccess }) {
         <FieldLabel>Issue / Notes</FieldLabel>
         <StyledInput as="textarea" rows={2} value={f.issue_description} onChange={(e) => upd("issue_description", e.target.value)} />
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 16 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
         <div>
           <FieldLabel>Date</FieldLabel>
-          <input type="date" value={f.preferred_date} onChange={(e) => upd("preferred_date", e.target.value)} style={inputStyle(false)} />
+          <input type="date" value={booking.preferred_date || ""} disabled style={{ ...inputStyle(false), opacity: 0.6, cursor: "not-allowed" }} />
+          <div style={{ fontSize: 11, color: C.textSec, marginTop: 4 }}>
+            To change the date, close this and use Reschedule instead.
+          </div>
         </div>
         <div>
           <FieldLabel>Time</FieldLabel>
           <StyledInput value={f.preferred_time} onChange={(e) => upd("preferred_time", e.target.value)} placeholder="HH:MM or slot" />
         </div>
+      </div>
+      <div style={{ marginBottom: 16 }}>
+        <FieldLabel required>Reason for This Edit</FieldLabel>
+        <StyledInput as="textarea" rows={2} value={editReason} onChange={(e) => setEditReason(e.target.value)} placeholder="e.g. Customer's phone number was mistyped at intake" />
       </div>
       {err && (
         <div style={{ background: C.redLight, color: C.red, padding: "8px 12px", borderRadius: 8, marginBottom: 12, fontSize: 13 }}>{err}</div>
@@ -2667,6 +2678,10 @@ function AdvisorBookingCancelModal({ booking, user, onClose, onSuccess }) {
 
   const save = async () => {
     setErr("");
+    if (!reason.trim()) {
+      setErr("A reason is required to cancel a booking");
+      return;
+    }
     setLoading(true);
     try {
       const { error } = await supabase
@@ -2674,7 +2689,7 @@ function AdvisorBookingCancelModal({ booking, user, onClose, onSuccess }) {
         .update({ status: "cancelled", updated_at: new Date().toISOString() })
         .eq("id", booking.id);
       if (error) throw error;
-      await logBookingActivity(booking.id, user.id, "cancelled", reason || "Cancelled by advisor");
+      await logBookingActivity(booking.id, user.id, "cancelled", reason.trim());
       if (notifyCustomer && booking.customer_phone) {
         await sendWA(booking.customer_phone, "booking_cancelled", [
           booking.customer_name || "Customer",
@@ -2697,8 +2712,8 @@ function AdvisorBookingCancelModal({ booking, user, onClose, onSuccess }) {
         ⚠️ This will cancel the booking. Action is logged.
       </div>
       <div style={{ marginBottom: 14 }}>
-        <FieldLabel>Reason (optional)</FieldLabel>
-        <StyledInput as="textarea" rows={2} value={reason} onChange={(e) => setReason(e.target.value)} />
+        <FieldLabel required>Reason for Cancelling</FieldLabel>
+        <StyledInput as="textarea" rows={2} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. Customer no longer needs the service" />
       </div>
       {booking.customer_phone && (
         <div
@@ -4902,6 +4917,7 @@ export default function AdvisorDashboard({ user, onLogout }) {
             bookings={bookings}
             user={user}
             visitCounts={visitCounts}
+            recentVisitNums={recentVisitNums}
             onConfirm={(b) => {
               setSelectedBooking(b);
               setModal("bookingConfirm");
