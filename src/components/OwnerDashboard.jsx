@@ -166,6 +166,18 @@ const formatIST = (s) => {
   });
 };
 
+// Date and time as two separate strings (e.g. "28 Sept" / "01:24 pm") so a
+// tight column can stack them instead of fitting formatIST's single wide
+// "28 Sept, 01:24 pm" line — used by the Overview drawer's Entry/Exit cells.
+const formatISTParts = (s) => {
+  if (!s) return { date: "—", time: "" };
+  const d = new Date(toZ(s));
+  return {
+    date: d.toLocaleString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short" }),
+    time: d.toLocaleString("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: true }),
+  };
+};
+
 const fmt = (n) =>
   `₹${(parseFloat(n) || 0).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
 const fmtMins = (m) =>
@@ -1988,6 +2000,18 @@ const OVERVIEW_DEPT_DETAILS_SOURCE = {
   three_m: { table: "three_m_details", workField: "work_types" },
 };
 
+// Only these 5 of 7 dept detail tables carry a hold_reason column (confirmed
+// against tata-motors-mobile/app/mechanic.js's HOLD_REASONS + owner.js's own
+// fetch, which is the real precedent this "On Hold" / "Spare Part Not
+// Available" split is ported from) — three_m/washing on-hold vehicles simply
+// have no reason recorded.
+const OVERVIEW_DEPTS_WITH_HOLD_REASON = new Set(["mechanic", "painter", "denter", "electrician", "alignment_balancing"]);
+// The exact hold_reason value HOLD_REASONS uses for "Spare Part Not
+// Available" in the mobile worker screens — the details table stores the
+// human label text itself (HOLD_REASONS[].label), not its key, so this must
+// match that label verbatim, not the "spare_not_available" key.
+const OVERVIEW_SPARE_PART_HOLD_REASON = "Spare Part Not Available";
+
 // done: has the vehicle moved past this stage (or, for the terminal "exit"
 // column, IS it at that stage — there's nothing further to move past).
 // time/start/end: the real timestamp column(s) for Time-type display — a
@@ -2057,20 +2081,28 @@ function getOverviewDeptState(v, deptKey) {
 // tall gap above Vehicle Journey once the Bookings ring (which used to set
 // the row's height) got shorter. This layout uses that freed vertical space
 // by going bigger on the number instead of leaving it blank.
-const FilterCard = ({ T, label, value, active, disabled, sub, onClick, danger }) => {
+const FilterCard = ({ T, label, value, active, disabled, sub, onClick, danger, splits, compact }) => {
   // Alarm cards signal via a glowing red border instead of a red number —
   // keeps the big value legible in both themes and reads as "this card
   // needs attention" rather than just coloring a digit.
   const restGlow = danger ? `0 0 12px 0 ${T.red}` : "none";
   const hoverGlow = danger ? `0 0 18px 2px ${T.red}` : "0 2px 6px rgba(22,31,56,.1)";
+  // Two genuinely different layouts, matching the design mockup exactly —
+  // not just a smaller version of the same layout. Hero cards: number
+  // left, label right, same row. Compact "at a glance" cards: number on
+  // top, label stacked below it, left-aligned block — not side by side.
+  const padding = compact ? "10px 10px" : "18px 22px";
   return (
     <div
       onClick={!disabled ? onClick : undefined}
       style={{
         background: active ? T.accentBg : T.surface,
-        border: `1px solid ${danger ? T.red : active ? T.accent : T.border}`,
+        borderLeft: `1px solid ${danger ? T.red : active ? T.accent : T.border}`,
+        borderRight: `1px solid ${danger ? T.red : active ? T.accent : T.border}`,
+        borderBottom: `1px solid ${danger ? T.red : active ? T.accent : T.border}`,
+        borderTop: `3px solid ${danger ? T.red : T.accent}`,
         borderRadius: 12,
-        padding: "18px 18px",
+        padding,
         minWidth: 0,
         width: "100%",
         cursor: disabled ? "default" : "pointer",
@@ -2078,8 +2110,7 @@ const FilterCard = ({ T, label, value, active, disabled, sub, onClick, danger })
         transition: "box-shadow 0.1s",
         boxShadow: restGlow,
         display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
+        flexDirection: "column",
         gap: 10,
       }}
       onMouseEnter={(e) => {
@@ -2089,38 +2120,83 @@ const FilterCard = ({ T, label, value, active, disabled, sub, onClick, danger })
         e.currentTarget.style.boxShadow = restGlow;
       }}
     >
-      <div
-        style={{
-          fontSize: 38,
-          fontWeight: 700,
-          color: disabled ? T.textMuted : T.text,
-          lineHeight: 1,
-          flexShrink: 0,
-        }}
-      >
-        {value}
-      </div>
-      <div style={{ textAlign: "right", minWidth: 0 }}>
+      {compact ? (
+        <div>
+          <div style={{ fontSize: 25, fontWeight: 700, color: disabled ? T.textMuted : T.text, lineHeight: 1 }}>
+            {value}
+          </div>
+          {/* Plain wrapped text, not one forced word per line — a 4-word
+              label like "Spare Part Not Available" needs the browser's own
+              wrap, not a 4-line stack taller than the card. */}
+          <div
+            style={{
+              fontSize: 11.5,
+              color: T.textSecondary,
+              fontWeight: 700,
+              letterSpacing: "0.15px",
+              marginTop: 4,
+              whiteSpace: "normal",
+              lineHeight: 1.2,
+            }}
+          >
+            {label}
+          </div>
+          {sub && <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 3 }}>{sub}</div>}
+        </div>
+      ) : (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+          <div style={{ fontSize: 38, fontWeight: 700, color: disabled ? T.textMuted : T.text, lineHeight: 1, flexShrink: 0 }}>
+            {value}
+          </div>
+          <div style={{ textAlign: "right", minWidth: 0 }}>
+            <div
+              style={{
+                fontSize: 14,
+                color: T.textSecondary,
+                fontWeight: 700,
+                letterSpacing: "0.1px",
+                lineHeight: 1.3,
+                whiteSpace: "normal",
+              }}
+            >
+              {label}
+            </div>
+            {sub && (
+              <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 3 }}>{sub}</div>
+            )}
+          </div>
+        </div>
+      )}
+      {/* Sub-breakdown row (Today/<7 Days/>7 Days, Pending/Completed/SDD,
+          etc.) — same real number just split further, not a second metric. */}
+      {splits && (
         <div
           style={{
-            fontSize: 17,
-            color: T.textSecondary,
-            fontWeight: 700,
-            letterSpacing: "0.1px",
-            lineHeight: 1.3,
+            display: "flex",
+            justifyContent: "space-between",
+            gap: 14,
+            paddingTop: 10,
+            borderTop: `1px solid ${T.border}`,
           }}
         >
-          {/* One word per line, regardless of how many words the label has —
-              keeps every card's label block the same shape instead of some
-              wrapping at odd widths and others staying on one line. */}
-          {typeof label === "string"
-            ? label.split(" ").map((word, i) => <div key={i}>{word}</div>)
-            : label}
+          {splits.map((s, i) => (
+            <div key={i} style={{ fontSize: 12, color: T.textSecondary }}>
+              <div
+                style={{
+                  fontFamily: FONT_HEADING,
+                  fontSize: 20,
+                  fontWeight: 700,
+                  color: T.text,
+                  lineHeight: 1.15,
+                }}
+              >
+                {s.value}
+              </div>
+              {s.label}
+            </div>
+          ))}
         </div>
-        {sub && (
-          <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 3 }}>{sub}</div>
-        )}
-      </div>
+      )}
     </div>
   );
 };
@@ -2128,7 +2204,7 @@ const FilterCard = ({ T, label, value, active, disabled, sub, onClick, danger })
 // At a Glance stat keys that mean "something needs attention" — their card
 // value renders in red instead of the default navy, matching Not Accepted/
 // Cancelled on the Bookings card beside it.
-const OVERVIEW_ALARM_STAT_KEYS = new Set(["stuck", "complaint"]);
+const OVERVIEW_ALARM_STAT_KEYS = new Set(["stuck", "complaint", "onHold", "sparePart"]);
 
 // One stepper cell per table column — each cell is exactly as wide as its
 // <col>, so the dot (centered within the cell) lines up perfectly under its
@@ -2142,6 +2218,15 @@ const FLOW_PULSE_KEYFRAMES = `
   0%, 100% { box-shadow: 0 0 0 0 ${"rgba(220,38,38,0.35)"}; }
   50% { box-shadow: 0 0 0 5px ${"rgba(220,38,38,0)"}; }
 }`;
+
+// Hides the native scrollbar on the Vehicle Journey row (a raw browser
+// scrollbar under the circles read as a stray UI glitch) while leaving the
+// row itself still scrollable by trackpad/touch/shift+wheel drag — the
+// connecting arrows already hint there's more off-screen.
+const OVERVIEW_HIDE_SCROLLBAR_CSS = `
+.ov-journey-scroll { scrollbar-width: none; -ms-overflow-style: none; }
+.ov-journey-scroll::-webkit-scrollbar { display: none; }
+`;
 
 function FlowStepperCell({
   T,
@@ -2968,24 +3053,18 @@ const overviewIsBodyshopAdvisor = (v) => {
 // Single-color (gold ring / navy text) nodes throughout — no longer
 // status-coded by live/done, per the royal redesign's update log. The
 // headline number is how many vehicles are AT that stage right now (not a
-// done-today count); clicking any node — including Entry and the renamed
-// "Delivery" endpoint — opens the drawer filtered to that stage.
+// done-today count); clicking any node — including the "Exit" endpoint —
+// opens the drawer filtered to that stage.
 function VehicleJourneyTracker({ T, vehicles, activeFilter, onSelect, mode }) {
   const isBodyshop = mode === "bodyshop";
 
   const today = todayISTDateStr();
-  // Neither "Entry" nor "Exit" is a real queueable current_stage (a vehicle's
-  // current_stage is already "front_checkup" the instant it's created — there
-  // is no distinct "sitting at entry" state, and "completed" is terminal, not
-  // a queue) — isQueuedAtFlowCol correctly returns false/never-matches for
-  // both, which is why these two endpoints used to show 0. What's actually
-  // meaningful at these two endpoints is throughput: how many vehicles
-  // checked in / were gate-exited today — the same numbers already shown by
-  // the "Check-ins Today" / "Deliveries Today" stat cards, reused here so
-  // the two counts can never disagree.
-  const todayEntryCount = vehicles.filter(
-    (v) => v.entry_time && istDateStr(v.entry_time) === today,
-  ).length;
+  // "Exit" isn't a real queueable current_stage ("completed" is terminal,
+  // not a queue) — isQueuedAtFlowCol correctly never matches it, which is
+  // why this endpoint used to show 0. What's actually meaningful here is
+  // throughput: how many vehicles were gate-exited today — the same number
+  // already shown by the "Deliveries Today" stat card, reused here so the
+  // two counts can never disagree.
   const todayExitCount = vehicles.filter(
     (v) => v.current_stage === "completed" && istDateStr(v.updated_at || v.entry_time) === today,
   ).length;
@@ -3011,21 +3090,34 @@ function VehicleJourneyTracker({ T, vehicles, activeFilter, onSelect, mode }) {
           filterKey: s.key,
           filterLabel: s.label,
         })),
+        // Once bodyshop-specific processing finishes (past Spare Assessment),
+        // a vehicle joins the exact same downstream pipeline Workshop-track
+        // vehicles already use — Workshop, PDI, Billing, Cashier, Ready for
+        // Delivery, Exit — same real current_stage values, one continuous
+        // sequence instead of stopping short. `vehicles` here is already
+        // scoped to this bodyshop-only list, so these counts can't include
+        // any Workshop-track vehicle.
+        ...OVERVIEW_FLOW_STAGES.filter((s) => !["entry", "front_checkup", "advisor"].includes(s.key)).map((s) => ({
+          ...s,
+          queued: vehicles.filter((v) => isQueuedAtFlowCol(v, s.key)).length,
+          ftype: "flow",
+          filterKey: s.key,
+          filterLabel: s.label,
+        })),
+        { key: "gate_exit", label: "Exit", queued: todayExitCount, ftype: "stat", filterKey: "exitToday", filterLabel: "Vehicles Delivered" },
       ]
     : [
-        ...OVERVIEW_FLOW_STAGES.map((s) =>
-          s.key === "entry"
-            ? { ...s, queued: todayEntryCount, ftype: "stat", filterKey: "today", filterLabel: "Today's Check‑ins" }
-            : {
-                ...s,
-                queued: vehicles.filter(
-                  (v) => isQueuedAtFlowCol(v, s.key) && (s.key !== "advisor" || overviewIsWorkshopAdvisor(v)),
-                ).length,
-                ftype: "flow",
-                filterKey: s.key,
-                filterLabel: s.label,
-              },
-        ),
+        // "Entry" dropped — the design mockup's Vehicle Journey starts at
+        // Front Checkup (8 nodes), not a 9th "today's check-ins" node.
+        ...OVERVIEW_FLOW_STAGES.filter((s) => s.key !== "entry").map((s) => ({
+          ...s,
+          queued: vehicles.filter(
+            (v) => isQueuedAtFlowCol(v, s.key) && (s.key !== "advisor" || overviewIsWorkshopAdvisor(v)),
+          ).length,
+          ftype: "flow",
+          filterKey: s.key,
+          filterLabel: s.label,
+        })),
         // Real gate-exit endpoint — separate from "Ready for Delivery" above,
         // which is vehicles still WAITING to be exited. This is vehicles the
         // gateman has actually processed out today (current_stage advances
@@ -3034,12 +3126,11 @@ function VehicleJourneyTracker({ T, vehicles, activeFilter, onSelect, mode }) {
         // timestamps match vehicles.updated_at to the second).
         { key: "gate_exit", label: "Exit", queued: todayExitCount, ftype: "stat", filterKey: "exitToday", filterLabel: "Vehicles Delivered" },
       ];
-  // Once a drawer is open, the main content column shrinks to ~1/3 width —
-  // 7 nodes in a row would get crushed. Switch to a vertical list instead,
-  // same pattern as the Snapshot section's activeFilter-driven column stack,
-  // so the table gets the horizontal (and, since this is much shorter,
-  // vertical) space back.
-  const compact = !!activeFilter;
+  // The drawer is a slide-in overlay now (matching the design mockup), not
+  // an inline column that shrinks this content — so this never needs to
+  // fall back to a vertical list anymore; it stays the full circle-and-arrow
+  // row regardless of whether a filter drawer is open.
+  const compact = false;
 
   return (
     <div style={{ borderBottom: `1px solid ${T.border}`, paddingBottom: 6, marginBottom: 6 }}>
@@ -3084,18 +3175,43 @@ function VehicleJourneyTracker({ T, vehicles, activeFilter, onSelect, mode }) {
           })}
         </div>
       ) : (
-        // Full-width: numbers-only "timeline" — one thin baseline rule under
-        // the whole row (a subway-map line, no station dots) carries the
-        // sense of sequence instead of circles/arrows; the active node gets
-        // a short tick on the line rather than a filled marker.
-        <div style={{ paddingTop: 4 }}>
-          <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", paddingBottom: 10 }}>
+        // Full-width: each stage as a closed circle (number centered, label
+        // below), connected by a full-length arrow touching both circles —
+        // same design as the redesigned mockup. Circle is a solid navy fill
+        // with cream text in light mode; in dark mode the fill goes
+        // transparent so just the cream number pops off the dark page
+        // (T.text flips cream/navy between themes, so it doubles as the
+        // dark-mode flag here rather than threading a separate prop through).
+        <div className="ov-journey-scroll" style={{ paddingTop: 4, overflowX: "auto", paddingBottom: 2 }}>
+          <style>{OVERVIEW_HIDE_SCROLLBAR_CSS}</style>
+          {/* Bodyshop's merged sequence runs to 13 nodes, wider than this
+              column at each circle's floor width (minWidth below) — rather
+              than letting that overflow push the whole page layout sideways,
+              this row scrolls horizontally on its own; a short sequence that
+              already fits (Workshop's 8 nodes) still spans edge-to-edge via
+              justify-content, no scrollbar appears. */}
+          <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between" }}>
             {stepStats.map((s, i) => {
               const isActive = activeFilter?.type === s.ftype && activeFilter.key === s.filterKey;
+              const isDark = T.text === "#f4ecd8";
               return (
                 <Fragment key={s.key}>
                   {i > 0 && (
-                    <div style={{ flexShrink: 0, fontSize: 20, fontWeight: 700, color: T.textSecondary, lineHeight: "24px" }}>→</div>
+                    <div style={{ flex: "1 1 auto", minWidth: 20, height: 68, position: "relative" }}>
+                      <div style={{ position: "absolute", left: -2, right: 5, top: 34, height: 2, background: T.text }} />
+                      <div
+                        style={{
+                          position: "absolute",
+                          right: 0,
+                          top: 28,
+                          width: 0,
+                          height: 0,
+                          borderStyle: "solid",
+                          borderWidth: "6px 0 6px 7px",
+                          borderColor: `transparent transparent transparent ${T.text}`,
+                        }}
+                      />
+                    </div>
                   )}
                   <div
                     onClick={() => onSelect(s.ftype, s.filterKey, s.filterLabel)}
@@ -3103,39 +3219,42 @@ function VehicleJourneyTracker({ T, vehicles, activeFilter, onSelect, mode }) {
                       display: "flex",
                       flexDirection: "column",
                       alignItems: "center",
-                      flex: 1,
-                      minWidth: 0,
+                      minWidth: 78,
                       cursor: "pointer",
                       padding: "0 2px",
                     }}
                   >
                     <div
                       style={{
-                        fontSize: 24,
-                        fontWeight: 700,
-                        lineHeight: 1,
-                        color: isActive ? T.accent : T.text,
+                        width: 68,
+                        height: 68,
+                        borderRadius: "50%",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        background: isDark ? "transparent" : T.sidebar,
+                        // Dark mode's fill is transparent (page background
+                        // shows through), so without its own edge the number
+                        // just floats with no circle visible at all — a thin
+                        // outline in the same cream as the digit restores the
+                        // ring. Light mode already has a solid navy fill, no
+                        // outline needed.
+                        border: isDark ? `2px solid ${T.text}` : "none",
+                        boxShadow: isActive ? `0 0 0 2px ${T.accent}` : "none",
+                        transition: "box-shadow .12s",
                       }}
                     >
-                      {s.queued}
+                      <span style={{ fontFamily: FONT_HEADING, fontSize: 25, fontWeight: 700, color: "#f4ecd8" }}>
+                        {s.queued}
+                      </span>
                     </div>
                     <div
                       style={{
-                        width: isActive ? 86 : 74,
-                        height: 3,
-                        borderRadius: 1.5,
-                        background: isActive ? T.accent : T.textMuted,
-                        marginTop: 7,
-                        transition: "width .12s,background .12s",
-                      }}
-                    />
-                    <div
-                      style={{
-                        fontSize: 13,
-                        fontWeight: 800,
-                        color: isActive ? T.accent : T.text,
+                        fontSize: 12.5,
+                        fontWeight: 700,
+                        color: isActive ? T.accent : T.textSecondary,
                         textAlign: "center",
-                        marginTop: isActive ? 5 : 7,
+                        marginTop: 7,
                         lineHeight: 1.25,
                       }}
                     >
@@ -3146,7 +3265,6 @@ function VehicleJourneyTracker({ T, vehicles, activeFilter, onSelect, mode }) {
               );
             })}
           </div>
-          <div style={{ marginLeft: "1%", marginRight: "1%", height: 1, background: T.border }} />
         </div>
       )}
     </div>
@@ -3165,9 +3283,10 @@ function VehicleJourneyTracker({ T, vehicles, activeFilter, onSelect, mode }) {
 // queue, not stale backlog.
 function ParallelCluster({ T, vehicles, activeFilter, deptHistory, workAssignedHistory, onSelect }) {
   const today = todayISTDateStr();
-  // Same reasoning as VehicleJourneyTracker: once a drawer is open the main
-  // column is too narrow for a 7-across grid, so switch to a vertical list.
-  const compact = !!activeFilter;
+  // Same reasoning as VehicleJourneyTracker: the drawer is a slide-in
+  // overlay, not an inline column that shrinks this content, so it never
+  // needs to fall back to a vertical list anymore.
+  const compact = false;
 
   const deptData = OVERVIEW_WORKSHOP_DEPTS.map((d) => {
     let pendingQueue = 0;
@@ -3261,93 +3380,108 @@ function ParallelCluster({ T, vehicles, activeFilter, deptHistory, workAssignedH
           ))}
         </div>
       ) : (
-        <div style={{ display: "grid", gridTemplateColumns: `repeat(${OVERVIEW_WORKSHOP_DEPTS.length}, 1fr)`, gap: 12 }}>
-          {deptData.map(({ d, activeCount, segs, legend, isActive, tooltip }) => (
-            <div
-              key={d.key}
-              title={tooltip}
-              onClick={() => onSelect(d.key)}
-              style={{ cursor: "pointer", perspective: 600, height: 100 }}
-            >
-              <div
-                style={{
-                  position: "relative",
-                  width: "100%",
-                  height: "100%",
-                  transformStyle: "preserve-3d",
-                  transition: "transform .5s",
-                }}
-                onMouseEnter={(e) => (e.currentTarget.style.transform = "rotateY(180deg)")}
-                onMouseLeave={(e) => (e.currentTarget.style.transform = "rotateY(0deg)")}
-              >
-                {/* Front — ring + active count */}
+        // One combined horizontal-bar chart, transparent (blends with the
+        // page like Advisor/Team Workload beside it) — a department's bar
+        // LENGTH is its share of the busiest department, and the fill order
+        // is reversed (Completed first) so the bar visually fills green-
+        // from-the-left as work finishes. Each segment's own count is
+        // written inside it; one shared legend up top instead of a
+        // per-card flip-to-see-the-breakdown.
+        <div>
+          <div
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              gap: 12,
+              fontSize: 11,
+              color: T.textSecondary,
+              marginBottom: 12,
+              paddingBottom: 10,
+              borderBottom: `1px solid ${T.border}`,
+            }}
+          >
+            {[
+              ["Completed", T.green],
+              ["In Progress", T.amber],
+              ["Today's Queue", TODAY_QUEUE_COLOR],
+              ["Pending Queue", T.statusNotStarted],
+            ].map(([label, color]) => (
+              <span key={label} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                <span style={{ width: 7, height: 7, borderRadius: "50%", background: color, flexShrink: 0 }} />
+                {label}
+              </span>
+            ))}
+          </div>
+          {(() => {
+            const maxTotal = Math.max(1, ...deptData.map(({ pendingQueue, todayQueue, inProgress, done }) => pendingQueue + todayQueue + inProgress + done));
+            return deptData.map(({ d, pendingQueue, todayQueue, inProgress, done, activeCount, isActive, tooltip }, i) => {
+              const total = pendingQueue + todayQueue + inProgress + done || 1;
+              const barWidthPct = (total / maxTotal) * 100;
+              const segs = [
+                { n: done, color: T.green },
+                { n: inProgress, color: T.amber },
+                { n: todayQueue, color: TODAY_QUEUE_COLOR },
+                { n: pendingQueue, color: T.statusNotStarted },
+              ];
+              return (
                 <div
+                  key={d.key}
+                  title={tooltip}
+                  onClick={() => onSelect(d.key)}
                   style={{
-                    position: "absolute",
-                    inset: 0,
-                    backfaceVisibility: "hidden",
-                    display: "flex",
-                    flexDirection: "column",
+                    display: "grid",
+                    gridTemplateColumns: "92px 1fr 30px",
                     alignItems: "center",
-                    gap: 5,
-                    borderRadius: 10,
-                    padding: "6px 4px",
-                    background: isActive ? T.accentBg : "transparent",
+                    gap: 12,
+                    padding: "9px 0",
+                    borderBottom: i === deptData.length - 1 ? "none" : `1px solid ${T.border}`,
+                    cursor: "pointer",
                   }}
                 >
-                  <div style={{ width: 52, height: 52, position: "relative" }}>
-                    <svg width="52" height="52" viewBox="0 0 100 100" style={{ transform: "rotate(-90deg)" }}>
-                      {segs.map((seg, i) => (
-                        <circle
+                  <div style={{ fontSize: 12.5, fontWeight: 700, color: isActive ? T.accent : T.text }}>{d.label}</div>
+                  <div
+                    style={{
+                      height: 28,
+                      borderRadius: 6,
+                      background: T.surfaceElevated,
+                      backgroundImage: `repeating-linear-gradient(to right, ${T.border} 0, ${T.border} 1px, transparent 1px, transparent 25%)`,
+                    }}
+                  >
+                    <div style={{ display: "flex", height: "100%", borderRadius: 6, overflow: "hidden", width: `${barWidthPct}%`, minWidth: 3 }}>
+                      {segs.filter((s) => s.n > 0).map((s, i) => (
+                        <div
                           key={i}
-                          cx="50"
-                          cy="50"
-                          r={RING_R}
-                          fill="none"
-                          stroke={seg.color}
-                          strokeWidth={11}
-                          strokeDasharray={seg.dasharray}
-                          strokeDashoffset={seg.dashoffset}
-                        />
+                          style={{
+                            width: `${(s.n / total) * 100}%`,
+                            background: s.color,
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            overflow: "hidden",
+                          }}
+                        >
+                          <span
+                            style={{
+                              fontFamily: FONT_HEADING,
+                              fontSize: 12.5,
+                              fontWeight: 700,
+                              color: "#fff",
+                              textShadow: "0 1px 2px rgba(0,0,0,.55)",
+                            }}
+                          >
+                            {s.n}
+                          </span>
+                        </div>
                       ))}
-                    </svg>
-                    <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none" }}>
-                      <div style={{ fontSize: 16, fontWeight: 700, color: T.text }}>{activeCount}</div>
                     </div>
                   </div>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: T.text, textAlign: "center" }}>{d.label}</div>
-                </div>
-                {/* Back — color-keyed legend with counts */}
-                <div
-                  style={{
-                    position: "absolute",
-                    inset: 0,
-                    backfaceVisibility: "hidden",
-                    transform: "rotateY(180deg)",
-                    background: T.surface,
-                    border: `1px solid ${T.border}`,
-                    borderRadius: 10,
-                    padding: "9px 8px",
-                    display: "flex",
-                    flexDirection: "column",
-                    justifyContent: "center",
-                    gap: 5,
-                  }}
-                >
-                  <div style={{ fontSize: 12.5, fontWeight: 700, color: T.text, textAlign: "center", marginBottom: 2 }}>
-                    {d.label}
+                  <div style={{ fontSize: 14, fontWeight: 700, fontFamily: FONT_HEADING, color: T.text, textAlign: "right" }}>
+                    {activeCount}
                   </div>
-                  {legend.map((lg) => (
-                    <div key={lg.label} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 10, color: T.textSecondary }}>
-                      <span style={{ width: 7, height: 7, borderRadius: "50%", background: lg.color, flexShrink: 0 }} />
-                      <span style={{ flex: 1, fontWeight: 600 }}>{lg.label}</span>
-                      <span style={{ fontWeight: 700, color: T.text }}>{lg.count}</span>
-                    </div>
-                  ))}
                 </div>
-              </div>
-            </div>
-          ))}
+              );
+            });
+          })()}
         </div>
       )}
     </div>
@@ -3372,8 +3506,12 @@ const WORKLOAD_SEGMENT_STYLE = (T, active) => ({
   color: active ? T.accentBg : T.textSecondary,
 });
 
-function AdvisorTeamWorkload({ T, vehicles, teams, activeFilter, onSelectAdvisor, onSelectTeam }) {
-  const [advisorRole, setAdvisorRole] = useState("advisor");
+function AdvisorTeamWorkload({ T, vehicles, teams, activeFilter, onSelectAdvisor, onSelectTeam, overviewTrack }) {
+  // No more its own Workshop Advisor/Body Shop Advisor switch — `vehicles`
+  // is already track-scoped by the topbar dropdown (see OverviewTab), so
+  // this just follows the same scope instead of asking the owner to pick
+  // it twice.
+  const advisorRole = overviewTrack === "bodyshop" ? "body_shop_advisor" : "advisor";
   const [teamRole, setTeamRole] = useState("mechanic");
 
   // Which journey stage a vehicle is queued at right now — reuses the same
@@ -3440,114 +3578,101 @@ function AdvisorTeamWorkload({ T, vehicles, teams, activeFilter, onSelectAdvisor
   const advisorCols = ["Workshop", "PDI", "Billing", "Cashier", "Ready for Delivery"];
   const teamCols = ["Pending Queue", "In Progress", "Completed"];
 
+  // Exact .section-label from the design mockup (16px Playfair/600/text),
+  // not the old 13px accent-colored "By Advisor"/"By Team Leader" kicker —
+  // and stacked one table above the other (marginBottom 22 on the first),
+  // not side by side.
+  const sectionLabelStyle = { fontFamily: FONT_HEADING, fontSize: 16, fontWeight: 600, color: T.text, marginBottom: 12 };
+  const thStyle = { fontSize: 10, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", textAlign: "center", padding: "0 4px 8px" };
+  const tdStyle = { fontSize: 13, color: T.textSecondary, textAlign: "center", padding: "9px 4px" };
   return (
     <div>
-      <div style={{ display: "flex", gap: 44, flexWrap: "wrap" }}>
-        <div style={{ flex: "1 1 300px" }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10, maxWidth: 420, flexWrap: "wrap", gap: 8 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: T.accent }}>By Advisor</div>
-            <div style={{ display: "flex", border: `1px solid ${T.border}`, borderRadius: 16, overflow: "hidden" }}>
-              {Object.entries(ADVISOR_ROLE_LABELS).map(([r, label]) => (
-                <div key={r} onClick={() => setAdvisorRole(r)} style={WORKLOAD_SEGMENT_STYLE(T, advisorRole === r)}>
-                  {label}
-                </div>
-              ))}
-            </div>
+      <div style={{ marginBottom: 22 }}>
+        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+          <div style={sectionLabelStyle}>Advisor Workload</div>
+        </div>
+        <div style={{ maxWidth: 560, overflowX: "auto" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1.3fr repeat(5,.85fr) .6fr", borderBottom: `2px solid ${T.text}` }}>
+            <div style={{ ...thStyle, textAlign: "left" }}>Advisor</div>
+            {advisorCols.map((c) => (
+              <div key={c} style={thStyle}>{c}</div>
+            ))}
+            <div style={thStyle}>Total</div>
           </div>
-          <div style={{ maxWidth: 560, overflowX: "auto" }}>
-            <div style={{ display: "grid", gridTemplateColumns: "1.3fr repeat(5,.85fr) .6fr", columnGap: 8, padding: "0 0 8px", borderBottom: `2px solid ${T.text}` }}>
-              <div style={{ fontSize: 10.5, fontWeight: 700, color: T.textMuted, textTransform: "uppercase" }}>Advisor</div>
-              {advisorCols.map((c) => (
-                <div key={c} style={{ fontSize: 10.5, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", textAlign: "center" }}>
-                  {c}
-                </div>
-              ))}
-              <div style={{ fontSize: 10.5, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", textAlign: "center" }}>Total</div>
-            </div>
-            {advisorWorkload.map((a) => {
-              const isActive = activeFilter?.type === "advisor" && activeFilter.key === a.name;
-              return (
-                <div
-                  key={a.name}
-                  onClick={() => onSelectAdvisor(a.name)}
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "1.3fr repeat(5,.85fr) .6fr",
-                    columnGap: 8,
-                    padding: "9px 0",
-                    borderBottom: `1px solid ${T.border}`,
-                    alignItems: "center",
-                    cursor: "pointer",
-                    background: isActive ? T.accentBg : "transparent",
-                  }}
-                >
-                  <div style={{ fontSize: 13.5, fontWeight: 600, color: T.text }}>{a.name}</div>
-                  {a.cols.map((c) => (
-                    <div key={c.label} style={{ fontSize: 13.5, textAlign: "center", color: T.textSecondary }}>
-                      {c.count}
-                    </div>
-                  ))}
-                  <div style={{ fontSize: 14.5, fontWeight: 700, textAlign: "center", color: T.text }}>{a.count}</div>
-                </div>
-              );
-            })}
-            {advisorWorkload.length === 0 && (
-              <div style={{ padding: "16px 0", fontSize: 12.5, color: T.textMuted }}>No {ADVISOR_ROLE_LABELS[advisorRole].toLowerCase()}s with active vehicles.</div>
-            )}
+          {advisorWorkload.map((a) => {
+            const isActive = activeFilter?.type === "advisor" && activeFilter.key === a.name;
+            return (
+              <div
+                key={a.name}
+                onClick={() => onSelectAdvisor(a.name)}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "1.3fr repeat(5,.85fr) .6fr",
+                  borderBottom: `1px solid ${T.border}`,
+                  alignItems: "center",
+                  cursor: "pointer",
+                  background: isActive ? T.accentBg : "transparent",
+                }}
+              >
+                <div style={{ ...tdStyle, textAlign: "left", fontWeight: 600, color: T.text }}>{a.name}</div>
+                {a.cols.map((c) => (
+                  <div key={c.label} style={tdStyle}>{c.count}</div>
+                ))}
+                <div style={{ ...tdStyle, fontWeight: 700, fontSize: 14, color: T.text }}>{a.count}</div>
+              </div>
+            );
+          })}
+          {advisorWorkload.length === 0 && (
+            <div style={{ padding: "16px 0", fontSize: 12.5, color: T.textMuted }}>No {ADVISOR_ROLE_LABELS[advisorRole].toLowerCase()}s with active vehicles.</div>
+          )}
+        </div>
+      </div>
+
+      <div>
+        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+          <div style={sectionLabelStyle}>Team Workload</div>
+          <div style={{ display: "flex", border: `1px solid ${T.border}`, borderRadius: 16, overflow: "hidden", marginBottom: 12 }}>
+            {Object.entries(TEAM_ROLE_LABELS).map(([r, label]) => (
+              <div key={r} onClick={() => setTeamRole(r)} style={WORKLOAD_SEGMENT_STYLE(T, teamRole === r)}>
+                {label}
+              </div>
+            ))}
           </div>
         </div>
-        <div style={{ flex: "1 1 300px" }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10, maxWidth: 420, flexWrap: "wrap", gap: 8 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: T.accent }}>By Team Leader</div>
-            <div style={{ display: "flex", border: `1px solid ${T.border}`, borderRadius: 16, overflow: "hidden" }}>
-              {Object.entries(TEAM_ROLE_LABELS).map(([r, label]) => (
-                <div key={r} onClick={() => setTeamRole(r)} style={WORKLOAD_SEGMENT_STYLE(T, teamRole === r)}>
-                  {label}
-                </div>
-              ))}
-            </div>
+        <div style={{ maxWidth: 560, overflowX: "auto" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1.3fr repeat(3,.9fr) .6fr", borderBottom: `2px solid ${T.text}` }}>
+            <div style={{ ...thStyle, textAlign: "left" }}>Team</div>
+            {teamCols.map((c) => (
+              <div key={c} style={thStyle}>{c}</div>
+            ))}
+            <div style={thStyle}>Total</div>
           </div>
-          <div style={{ maxWidth: 560, overflowX: "auto" }}>
-            <div style={{ display: "grid", gridTemplateColumns: "1.3fr repeat(3,.9fr) .6fr", columnGap: 8, padding: "0 0 8px", borderBottom: `2px solid ${T.text}` }}>
-              <div style={{ fontSize: 10.5, fontWeight: 700, color: T.textMuted, textTransform: "uppercase" }}>Team</div>
-              {teamCols.map((c) => (
-                <div key={c} style={{ fontSize: 10.5, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", textAlign: "center" }}>
-                  {c}
-                </div>
-              ))}
-              <div style={{ fontSize: 10.5, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", textAlign: "center" }}>Total</div>
-            </div>
-            {teamWorkload.map((t) => {
-              const isActive = activeFilter?.type === "team" && activeFilter.key === t.id;
-              return (
-                <div
-                  key={t.id}
-                  onClick={() => onSelectTeam(t)}
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "1.3fr repeat(3,.9fr) .6fr",
-                    columnGap: 8,
-                    padding: "9px 0",
-                    borderBottom: `1px solid ${T.border}`,
-                    alignItems: "center",
-                    cursor: "pointer",
-                    background: isActive ? T.accentBg : "transparent",
-                  }}
-                >
-                  <div style={{ fontSize: 13.5, fontWeight: 600, color: T.text }}>{t.name}</div>
-                  {t.cols.map((c) => (
-                    <div key={c.label} style={{ fontSize: 13.5, textAlign: "center", color: T.textSecondary }}>
-                      {c.count}
-                    </div>
-                  ))}
-                  <div style={{ fontSize: 14.5, fontWeight: 700, textAlign: "center", color: T.text }}>{t.count}</div>
-                </div>
-              );
-            })}
-            {teamWorkload.length === 0 && (
-              <div style={{ padding: "16px 0", fontSize: 12.5, color: T.textMuted }}>No {TEAM_ROLE_LABELS[teamRole].toLowerCase()} teams configured.</div>
-            )}
-          </div>
+          {teamWorkload.map((t) => {
+            const isActive = activeFilter?.type === "team" && activeFilter.key === t.id;
+            return (
+              <div
+                key={t.id}
+                onClick={() => onSelectTeam(t)}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "1.3fr repeat(3,.9fr) .6fr",
+                  borderBottom: `1px solid ${T.border}`,
+                  alignItems: "center",
+                  cursor: "pointer",
+                  background: isActive ? T.accentBg : "transparent",
+                }}
+              >
+                <div style={{ ...tdStyle, textAlign: "left", fontWeight: 600, color: T.text }}>{t.name}</div>
+                {t.cols.map((c) => (
+                  <div key={c.label} style={tdStyle}>{c.count}</div>
+                ))}
+                <div style={{ ...tdStyle, fontWeight: 700, fontSize: 14, color: T.text }}>{t.count}</div>
+              </div>
+            );
+          })}
+          {teamWorkload.length === 0 && (
+            <div style={{ padding: "16px 0", fontSize: 12.5, color: T.textMuted }}>No {TEAM_ROLE_LABELS[teamRole].toLowerCase()} teams configured.</div>
+          )}
         </div>
       </div>
     </div>
@@ -3591,7 +3716,7 @@ const BOOKING_RING_META = {
   noshow: { label: "No Show", color: "#8a5a15", tint: "#f5ecd9" },
 };
 
-function BookingsRingPanel({ T, bookings, compact, dayIdx }) {
+function BookingsRingPanel({ T, bookings, compact, dayIdx, onDayChange }) {
   const [hoverStatus, setHoverStatus] = useState(null);
   const todayStr = todayISTDateStr();
   const dateFor = (offset) => {
@@ -3635,15 +3760,41 @@ function BookingsRingPanel({ T, bookings, compact, dayIdx }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [checkins, secondBucketKey, secondBucketCount],
   );
-  const ringSize = compact ? 40 : 108;
+  // Exact design-mockup values (owner-liked-base.html's .ring-wrap etc.) —
+  // not an approximation: 112px ring, 148px alarms column, 340px panel.
+  const ringSize = compact ? 40 : 112;
 
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
+      {/* Head row lives inside this bordered box (matching the design
+          mockup's .bookings-head), not as a page-level header above it. */}
+      {!compact && (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+          <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>Scheduled Bookings</span>
+          <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+            <span
+              onClick={() => onDayChange?.((i) => Math.max(0, i - 1))}
+              style={{ cursor: "pointer", color: T.accent, fontWeight: 700, fontSize: 15, padding: "2px 4px" }}
+            >
+              ‹
+            </span>
+            <span style={{ fontSize: 12.5, fontWeight: 700, color: T.text, minWidth: 56, textAlign: "center" }}>
+              {BOOKING_DAY_OFFSETS[dayIdx].label}
+            </span>
+            <span
+              onClick={() => onDayChange?.((i) => Math.min(BOOKING_DAY_OFFSETS.length - 1, i + 1))}
+              style={{ cursor: "pointer", color: T.accent, fontWeight: 700, fontSize: 15, padding: "2px 4px" }}
+            >
+              ›
+            </span>
+          </div>
+        </div>
+      )}
       {/* Ring stacked above its own legend (not beside it) so the block stays
           narrow — that's the horizontal room Not Accepted/Cancelled use to
           grow wider. The block is vertically centered and stretches with
           the card, so it fills the same height the card already had. */}
-      <div style={{ display: "flex", gap: 16, alignItems: "center", flex: 1 }}>
+      <div style={{ display: "flex", gap: 14, alignItems: "center", flex: 1 }}>
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 10, flexShrink: 0 }}>
           <div style={{ width: ringSize, height: ringSize, position: "relative", flexShrink: 0 }}>
             <svg width={ringSize} height={ringSize} viewBox="0 0 100 100" style={{ transform: "rotate(-90deg)" }}>
@@ -3665,7 +3816,7 @@ function BookingsRingPanel({ T, bookings, compact, dayIdx }) {
               ))}
             </svg>
             <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none" }}>
-              <div style={{ fontSize: compact ? 12 : 22, fontWeight: 700, color: T.text }}>{total}</div>
+              <div style={{ fontFamily: FONT_HEADING, fontSize: compact ? 12 : 24, fontWeight: 700, color: T.text }}>{total}</div>
             </div>
           </div>
 
@@ -3681,31 +3832,58 @@ function BookingsRingPanel({ T, bookings, compact, dayIdx }) {
                     display: "flex",
                     alignItems: "center",
                     gap: 6,
-                    fontSize: 13,
+                    fontSize: 12.5,
                     color: T.textSecondary,
-                    padding: "4px 5px",
-                    borderRadius: 6,
-                    cursor: "pointer",
-                    transition: "background .1s,transform .1s",
-                    background: hoverStatus === k ? meta.tint : "transparent",
-                    transform: hoverStatus === k ? "scale(1.05)" : "scale(1)",
+                    cursor: "default",
                   }}
                 >
                   <span style={{ width: 7, height: 7, borderRadius: "50%", background: meta.color, flexShrink: 0 }} />
                   <span style={{ fontWeight: 700, flex: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{meta.label}</span>
-                  <b style={{ fontSize: 15, color: T.text, fontWeight: 700 }}>{ringBuckets[k]}</b>
+                  <b style={{ fontSize: 14, color: T.text, fontWeight: 700 }}>{ringBuckets[k]}</b>
                 </div>
               );
             })}
           </div>
         </div>
 
-        {/* Same FilterCard component the At a Glance cards use, so the number
-            styling can never drift out of sync — flagged red since both are
-            "needs attention" numbers. */}
-        <div style={{ display: "flex", flexDirection: "column", gap: 10, flex: 1, minWidth: 0 }}>
-          <FilterCard T={T} label="Not Accepted" value={notAccepted} danger />
-          <FilterCard T={T} label="Cancelled" value={deadCount} danger />
+        {/* Dedicated small alarm card (exact .booking-alarm from the design
+            mockup) — not the shared FilterCard, which is sized for the At a
+            Glance row, not this box. Stacked, pushed to the box's right
+            edge. */}
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: 8,
+            width: compact ? "100%" : 148,
+            flexShrink: 0,
+            marginLeft: compact ? 0 : "auto",
+          }}
+        >
+          {[
+            ["Not Accepted", notAccepted],
+            ["Cancelled", deadCount],
+          ].map(([label, value]) => (
+            <div
+              key={label}
+              style={{
+                background: T.surface,
+                border: `1px solid ${T.red}`,
+                borderRadius: 10,
+                padding: "8px 12px",
+                boxShadow: "0 0 10px 0 rgba(164,69,47,0.22)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                cursor: "pointer",
+              }}
+            >
+              <span style={{ fontSize: 11.5, fontWeight: 700, color: T.textSecondary, textTransform: "uppercase" }}>
+                {label}
+              </span>
+              <span style={{ fontFamily: FONT_HEADING, fontSize: 19, fontWeight: 700, color: T.text }}>{value}</span>
+            </div>
+          ))}
         </div>
       </div>
     </div>
@@ -3720,209 +3898,222 @@ function BookingsRingPanel({ T, bookings, compact, dayIdx }) {
 // (same array/object/Map references, and handleDotHover/Leave/Click are
 // useCallback([])-stabilized), so React.memo's default shallow comparison
 // correctly skips re-rendering rows the hover didn't touch.
-// Exact fr-ratio column layout from the design mock's drawer table (a CSS
-// grid of divs, not an HTML <table> — the mock never uses <table>/<th>/<td>).
-const OVERVIEW_TABLE_GRID_COLS = "1.4fr 1.2fr 1fr 1.5fr 1.5fr .8fr .8fr";
+// Real-data stage meta (label + color) for the drawer's journey-stage pill —
+// same idea as the design mock's STAGE_META, keyed by this app's actual
+// current_stage/bodyshop_stage values instead of the mock's placeholder set.
+const overviewStageMetaMap = (T) => ({
+  front_checkup: { label: "Front Checkup", color: T.purple, bg: T.purpleLight },
+  advisor_review: { label: "Advisor Review", color: T.blue, bg: T.blueLight },
+  pre_quotation: { label: "Pre-Quotation", color: T.blue, bg: T.blueLight },
+  claim_registration: { label: "Claim Registration", color: T.blue, bg: T.blueLight },
+  final_quotation: { label: "Final Quotation", color: T.blue, bg: T.blueLight },
+  survey: { label: "Survey", color: T.blue, bg: T.blueLight },
+  survey_approval: { label: "Survey Approval", color: T.blue, bg: T.blueLight },
+  spare_assessment: { label: "Spare Assessment", color: T.blue, bg: T.blueLight },
+  pending: { label: "Workshop", color: T.amber, bg: T.amberLight },
+  pdi: { label: "PDI", color: T.cyan, bg: T.cyanLight },
+  billing: { label: "Billing", color: T.accent, bg: T.accentBg },
+  payment: { label: "Cashier", color: T.accent, bg: T.accentBg },
+  ready_for_exit: { label: "Ready for Delivery", color: T.green, bg: T.greenLight },
+  completed: { label: "Completed", color: T.green, bg: T.greenLight },
+});
+const getOverviewStageMeta = (T, v) => {
+  const key = v.current_stage === "bodyshop_processing" ? v.bodyshop_stage : v.current_stage;
+  return overviewStageMetaMap(T)[key] || { label: key || "—", color: T.textSecondary, bg: T.surfaceElevated };
+};
+const OVERVIEW_DEPT_STATUS_LABEL = { not_started: "Pending", in_progress: "In Progress", on_hold: "On Hold", completed: "Done" };
+// One glyph per department status — replaces the "Mechanic: Pending" text
+// repeated across every row with a single sign (name still shown, status word
+// dropped): tick = done, refresh = work in progress, pause = on hold, dot =
+// not started yet. Full status still available on hover via the row's title.
+const overviewDeptStatusIcon = (T, status) => {
+  switch (status) {
+    case "completed":
+      return { glyph: "✓", color: T.green };
+    case "in_progress":
+      return { glyph: "↻", color: T.amber };
+    case "on_hold":
+      return { glyph: "⏸", color: T.red };
+    case "not_started":
+    default:
+      return { glyph: "●", color: T.statusNotStarted };
+  }
+};
 
-// Click-to-expand (not hover) for the department dot cluster — the main-row
-// dots themselves show nothing on hover or click beyond a pointer cursor;
-// clicking the cluster toggles a real `isExpanded` prop (owned by OverviewTab,
-// see expandedDeptVehicleId) that opens a full-width panel BELOW the row,
-// which stays open until the cluster is clicked again or something else is
-// clicked/selected (outside-click closes it — see the effect next to
-// expandedDeptVehicleId). Detail on hover now lives entirely inside that
-// expanded panel, not on the small dots.
-const OVERVIEW_DEPT_HOVER_CSS = `
-.ov-dept-expand-panel { max-height: 0; opacity: 0; overflow: hidden; transition: max-height .25s ease, opacity .2s ease; }
-.ov-dept-expand-panel.is-open { max-height: 100px !important; opacity: 1 !important; }
-`;
-
-// 9px dot + uniform faint navy border, matching the mock's journeyDots/
-// deptDots exactly (mock uses one flat border color for every state, not a
-// per-state border like the rest of this codebase's DeptStatusDot).
-const OverviewMockDot = ({ color, onHover, onLeave, onClick, title, className }) => (
-  <span
-    title={title}
-    className={className}
-    onMouseEnter={onHover}
-    onMouseLeave={onLeave}
-    onClick={onClick}
-    style={{
-      width: 9,
-      height: 9,
-      borderRadius: "50%",
-      background: color,
-      border: "1px solid rgba(22,31,56,.14)",
-      cursor: onClick ? "pointer" : "default",
-      flexShrink: 0,
-    }}
-  />
-);
-
-const OverviewVehicleRow = memo(function OverviewVehicleRow({
-  T,
-  v,
-  teams,
-  deptHistory,
-  onVehiclePress,
-  onDotHover,
-  onDotLeave,
-  onDotClick,
-  isDeptExpanded,
-  onToggleDeptExpand,
-}) {
-  const stageInfos = OVERVIEW_FLOW_STAGES.map((s) => getOverviewFlowStage(v, s.key, deptHistory));
-  const firstIncompleteIdx = stageInfos.findIndex((s) => !s.done);
+// Matches the design mock's .veh-row card exactly: a simple, flat row —
+// vehicle + advisor on the left, journey stage pill + entry/exit on the
+// right — with one optional contextual block below, swapped in depending on
+// which filter opened the drawer (owner's explicit call: department status
+// when the drawer came from Vehicle Journey / Workshop Load / staff workload,
+// hold reason from On Hold / Spare Part Not Available, complaint text from
+// Vehicle Complaints — everything else just shows the common fields).
+const OverviewVehicleRow = memo(function OverviewVehicleRow({ T, v, activeFilter, deptDetails, onVehiclePress }) {
+  const meta = getOverviewStageMeta(T, v);
   const isExited = v.current_stage === "completed" || v.current_stage === "ready_for_exit";
-  // Everything after Entry is done once nothing's incomplete — read the last
-  // stage's own label ("Ready for Delivery") rather than hardcoding a
-  // different word here, so this caption can never drift from the dots above it.
-  const currentStage = firstIncompleteIdx === -1 ? OVERVIEW_FLOW_STAGES[OVERVIEW_FLOW_STAGES.length - 1] : OVERVIEW_FLOW_STAGES[firstIncompleteIdx];
-  const currentStageColor = firstIncompleteIdx === -1 ? T.green : T.amber;
-  const cellBase = { fontSize: 14, color: T.text };
+  const isOverdue = !isExited && v.expected_completion_time && new Date(toZ(v.expected_completion_time)) < new Date();
+  const flags = [
+    isOverdue && { cls: "od", label: "OVERDUE", bg: T.redLight, color: T.red },
+    (v.customer_complaints || []).length > 0 && { cls: "cp", label: "COMPLAINT", bg: T.amberLight, color: T.amber },
+    v.service_type === "warranty" && { cls: "wr", label: "WARRANTY", bg: T.purpleLight, color: T.purple },
+  ].filter(Boolean);
+
+  const ftype = activeFilter?.type;
+  const showDeptStatus = ["flow", "bodyshop", "dept", "advisor", "team"].includes(ftype);
+  const showHoldReason = ftype === "stat" && (activeFilter.key === "onHold" || activeFilter.key === "sparePart");
+  const showComplaint = ftype === "stat" && activeFilter.key === "complaint";
+  const deptLabelOf = (key) => OVERVIEW_WORKSHOP_DEPTS.find((d) => d.key === key)?.label || key;
+
+  const ws = v.work_stages?.[0];
+  let holdDeptKey = null;
+  let holdReasonText = null;
+  if (showHoldReason && ws) {
+    holdDeptKey = DEPT_KEYS.find((k) => ws[`${k}_status`] === "on_hold");
+    holdReasonText = holdDeptKey ? deptDetails?.[v.id]?.[holdDeptKey]?.holdReason || "No reason recorded" : null;
+  }
 
   return (
     <div
-      onMouseEnter={(e) => (e.currentTarget.style.background = T.surfaceElevated)}
-      onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+      onClick={() => onVehiclePress(v)}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.boxShadow = T.shadowMd;
+        e.currentTarget.style.borderColor = T.borderStrong;
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.boxShadow = "none";
+        e.currentTarget.style.borderColor = T.border;
+      }}
       style={{
-        display: "grid",
-        gridTemplateColumns: OVERVIEW_TABLE_GRID_COLS,
-        columnGap: 14,
-        padding: "15px 0",
-        borderBottom: `1px solid ${T.border}`,
-        alignItems: "center",
+        background: T.surface,
+        border: `1px solid ${T.border}`,
+        borderRadius: 12,
+        padding: "13px 14px",
+        marginBottom: 8,
+        cursor: "pointer",
+        transition: "box-shadow .12s, border-color .12s",
       }}
     >
-      <div>
-        <span
-          onClick={() => onVehiclePress(v)}
-          style={{ fontSize: 14.5, fontWeight: 700, color: T.text, lineHeight: 1.25, cursor: "pointer" }}
-        >
-          {v.vehicle_number}
-        </span>
-        <div style={{ fontSize: 12.5, color: T.textMuted, marginTop: 1 }}>{v.model || "—"}</div>
-      </div>
-      <div style={cellBase}>{v.customer_name || "—"}</div>
-      <div style={cellBase}>{v.advisor?.full_name || "—"}</div>
-
-      {/* Journey — dots, plus the vehicle's current stage named underneath so
-          the row doesn't require memorizing dot-sequence order at a glance. */}
-      <div>
-        <div style={{ display: "flex", gap: 5 }}>
-          {OVERVIEW_FLOW_STAGES.map((s, i) => {
-            const info = stageInfos[i];
-            const state = info.done ? "completed" : i === firstIncompleteIdx ? "in_progress" : "not_started";
-            return (
-              <OverviewMockDot
-                key={s.key}
-                title={s.label}
-                color={overviewStatusColor(T, state).bg}
-                onHover={(e) => onDotHover(e, v.id, s.key)}
-                onLeave={onDotLeave}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onDotClick(e, v.id, s.key);
-                }}
-              />
-            );
-          })}
-        </div>
-        <div style={{ fontSize: 10.5, fontWeight: 700, color: currentStageColor, marginTop: 4 }}>{currentStage.label}</div>
-      </div>
-
-      {/* Departments — the dots themselves show nothing (no hover, no click
-          detail) — clicking anywhere in the cluster just toggles the
-          full-width panel below (see ov-dept-expand-panel) open/closed. It
-          stays open regardless of mouse position until clicked again or
-          something else is clicked/selected (outside-click handled by
-          OverviewTab's expandedDeptVehicleId effect). */}
-      <div
-        className="ov-dept-cluster"
-        onClick={() => onToggleDeptExpand(v.id)}
-        style={{ display: "flex", gap: 5, flexWrap: "wrap", cursor: "pointer" }}
-      >
-        {OVERVIEW_WORKSHOP_DEPTS.map((d) => {
-          const state = getOverviewDeptState(v, d.key);
-          return <OverviewMockDot key={d.key} color={overviewStatusColor(T, state).bg} />;
-        })}
-      </div>
-
-      <div style={{ fontSize: 13, color: T.textMuted }}>{formatIST(v.entry_time)}</div>
-      {/* Exp. Exit — expected time (amber, red if overdue) while active, real
-          exit time (green, bold) once the vehicle has actually completed. */}
-      {(() => {
-        if (v.current_stage === "completed") {
-          const t = v.actual_completion_time || v.exit_time || v.updated_at;
-          return <div style={{ fontSize: 13, color: T.green, fontWeight: 700 }}>{t ? formatIST(t) : "—"}</div>;
-        }
-        if (!v.expected_completion_time) {
-          return <div style={{ fontSize: 13, color: T.textMuted }}>—</div>;
-        }
-        const overdue = !isExited && new Date(toZ(v.expected_completion_time)) < new Date();
-        return (
-          <div style={{ fontSize: 13, color: overdue ? T.red : T.amber, fontWeight: overdue ? 800 : 600 }}>
-            {formatIST(v.expected_completion_time)}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 14 }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontFamily: "'DM Mono',monospace", fontWeight: 800, fontSize: 14.5, color: T.text }}>{v.vehicle_number}</div>
+          <div style={{ fontSize: 12.5, color: T.textSecondary, marginTop: 2 }}>
+            {v.model || "—"} · {v.advisor?.full_name || "—"}
           </div>
-        );
-      })()}
-
-      {/* Full-width expand row — a sibling grid item spanning every column
-          (gridColumn: "1 / -1"), opened by clicking the Departments dots
-          above. Hovering a department entry HERE shows its rich detail card
-          (team/times/work list) via the same popover the dots used to trigger
-          directly — that's the only place department detail shows now. */}
-      <div className={`ov-dept-expand-panel${isDeptExpanded ? " is-open" : ""}`} style={{ gridColumn: "1 / -1" }}>
-        <div
-          style={{
-            display: "flex",
-            flexWrap: "wrap",
-            gap: "6px 22px",
-            paddingTop: 10,
-            marginTop: 2,
-            borderTop: `1px dashed ${T.border}`,
-          }}
-        >
-          {OVERVIEW_WORKSHOP_DEPTS.map((d) => {
-            const state = getOverviewDeptState(v, d.key);
-            const team = overviewTeamNameForDept(teams, v, d.key);
-            return (
-              <div
-                key={d.key}
-                onMouseEnter={(e) => onDotHover(e, v.id, d.key, true)}
-                onMouseLeave={onDotLeave}
-                style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, cursor: "default" }}
-              >
+          {flags.length > 0 && (
+            <div style={{ display: "flex", gap: 4, marginTop: 4 }}>
+              {flags.map((f) => (
                 <span
-                  style={{
-                    width: 8,
-                    height: 8,
-                    borderRadius: "50%",
-                    background: overviewStatusColor(T, state).bg,
-                    border: "1px solid rgba(22,31,56,.14)",
-                    flexShrink: 0,
-                  }}
-                />
-                <span style={{ color: T.textSecondary, fontWeight: 600 }}>{d.label}</span>
-                {team && <span style={{ color: T.textMuted, fontSize: 10.5 }}>👥 {team}</span>}
-              </div>
+                  key={f.cls}
+                  style={{ fontSize: 9.5, fontWeight: 800, padding: "2px 6px", borderRadius: 5, background: f.bg, color: f.color }}
+                >
+                  {f.label}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
+          <div style={{ textAlign: "right", minWidth: 52 }}>
+            <div style={{ fontSize: 9.5, fontWeight: 700, color: T.textMuted, textTransform: "uppercase" }}>Entry</div>
+            {(() => {
+              const p = formatISTParts(v.entry_time);
+              return (
+                <>
+                  <div style={{ fontSize: 12, color: T.textSecondary, marginTop: 1 }}>{p.date}</div>
+                  {p.time && <div style={{ fontSize: 10.5, color: T.textMuted }}>{p.time}</div>}
+                </>
+              );
+            })()}
+          </div>
+          <div style={{ textAlign: "right", minWidth: 52 }}>
+            <div style={{ fontSize: 9.5, fontWeight: 700, color: T.textMuted, textTransform: "uppercase" }}>Exit</div>
+            {(() => {
+              if (v.current_stage === "completed") {
+                const p = formatISTParts(v.actual_completion_time || v.exit_time || v.updated_at);
+                return (
+                  <>
+                    <div style={{ fontSize: 12, color: T.green, fontWeight: 700, marginTop: 1 }}>{p.date}</div>
+                    {p.time && <div style={{ fontSize: 10.5, color: T.green }}>{p.time}</div>}
+                  </>
+                );
+              }
+              if (!v.expected_completion_time) return <div style={{ fontSize: 12, color: T.textMuted, marginTop: 1 }}>—</div>;
+              const p = formatISTParts(v.expected_completion_time);
+              const c = isOverdue ? T.red : T.amber;
+              return (
+                <>
+                  <div style={{ fontSize: 12, color: c, fontWeight: isOverdue ? 800 : 600, marginTop: 1 }}>{p.date}</div>
+                  {p.time && <div style={{ fontSize: 10.5, color: c }}>{p.time}</div>}
+                </>
+              );
+            })()}
+          </div>
+          {/* Fixed width (sized to a single word like "Workshop"), text wraps
+              instead of growing — otherwise a longer stage name ("Ready for
+              Delivery", "Front Checkup") pushes Entry/Exit sideways by a
+              different amount on every row, since this pill sits after them
+              in the same right-aligned flex group. Fixed width keeps
+              Entry/Exit at the same x-position on every row. */}
+          <div
+            style={{
+              background: meta.bg,
+              color: meta.color,
+              borderRadius: 10,
+              padding: "5px 6px",
+              fontSize: 10.5,
+              fontWeight: 700,
+              width: 76,
+              flexShrink: 0,
+              textAlign: "center",
+              lineHeight: 1.25,
+            }}
+          >
+            {meta.label}
+          </div>
+        </div>
+      </div>
+
+      {showDeptStatus && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 16px", marginTop: 10, paddingTop: 10, borderTop: `1px dashed ${T.border}` }}>
+          {OVERVIEW_WORKSHOP_DEPTS.filter((d) => ws?.[`${d.key}_required`]).map((d) => {
+            const status = ws?.[`${d.key}_status`] || "not_started";
+            const icon = overviewDeptStatusIcon(T, status);
+            return (
+              <span
+                key={d.key}
+                title={`${d.label}: ${OVERVIEW_DEPT_STATUS_LABEL[status] || "Pending"}`}
+                style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11.5, fontWeight: 600, color: T.textSecondary }}
+              >
+                <span style={{ color: icon.color, fontSize: 12, fontWeight: 800, lineHeight: 1 }}>{icon.glyph}</span>
+                {d.label}
+              </span>
             );
           })}
         </div>
-      </div>
+      )}
+
+      {showHoldReason && (
+        <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px dashed ${T.border}`, fontSize: 12.5, color: T.red, fontWeight: 600 }}>
+          On Hold — {holdDeptKey ? deptLabelOf(holdDeptKey) : "—"}: {holdReasonText || "No reason recorded"}
+        </div>
+      )}
+
+      {showComplaint && (
+        <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px dashed ${T.border}` }}>
+          {(v.customer_complaints || []).length === 0 ? (
+            <div style={{ fontSize: 12.5, color: T.textMuted }}>No complaint details recorded.</div>
+          ) : (
+            (v.customer_complaints || []).map((c, i) => (
+              <div key={c.id || i} style={{ fontSize: 12.5, color: T.textSecondary, marginTop: i ? 4 : 0 }}>
+                <b style={{ color: T.text }}>Work {c.complaint_number || i + 1}:</b> {c.complaint_text}
+              </div>
+            ))
+          )}
+        </div>
+      )}
     </div>
   );
 });
 
-// Collapsible-layout headers are plain text (not clickable) until a drawer
-// is open, matching the update log: "headers are only interactive/
-// collapsible while a filter drawer is open; otherwise sections are always
-// expanded."
-const overviewOpenOnly = (section) => {
-  const o = { snapshot: false, journey: false, departments: false, workload: false };
-  if (section) o[section] = true;
-  return o;
-};
 const OVERVIEW_SECTION_OPEN_ALL = { snapshot: true, journey: true, departments: true, workload: true };
 
 // Parses vehicle_history's work_assigned "Depts: mechanic, alignment
@@ -3980,30 +4171,21 @@ const OverviewControlPill = ({ T, label, value, onChange, children }) => (
   </div>
 );
 
-const OverviewSectionHeader = ({ T, activeFilter, sectionOpen, onToggle, section, kicker, title, subtitle, big, extra }) => (
+// Plain, non-interactive section label (matching the design mockup's
+// .section-label) — the drawer is a slide-in overlay now, not an inline
+// column that shrinks this content, so there's no more "collapse this
+// section while a filter is open" behavior to toggle.
+const OverviewSectionHeader = ({ T, kicker, title, subtitle, big, extra }) => (
   <div
-    onClick={() => onToggle(section)}
     style={{
       display: "flex",
       alignItems: subtitle ? "flex-start" : "baseline",
       gap: 8,
-      cursor: activeFilter ? "pointer" : "default",
-      marginBottom: 5,
+      marginBottom: 12,
       flexWrap: "wrap",
     }}
   >
-    {activeFilter && (
-      <span style={{ fontSize: 12, color: T.accent, fontWeight: 700 }}>
-        {sectionOpen[section] ? "▾" : "▸"}
-      </span>
-    )}
-    {/* The "big" greeting (title+subtitle) is a full-width welcome banner —
-        once the drawer opens and this column narrows to ~300px it's not
-        useful there, just a wide block of text pushing the real content
-        (the day switcher / stat cards) down. Drop it entirely in that
-        state rather than shrinking it to fit. */}
-    {!(big && activeFilter) && (
-      <div>
+    <div>
         {kicker ? (
           <span style={{ fontSize: 13, fontWeight: 700, color: T.accent, textTransform: "uppercase", letterSpacing: "1.5px" }}>
             {title}
@@ -4012,7 +4194,7 @@ const OverviewSectionHeader = ({ T, activeFilter, sectionOpen, onToggle, section
           <span
             style={{
               fontFamily: FONT_HEADING,
-              fontSize: big ? 30 : 19,
+              fontSize: big ? 30 : 16,
               fontWeight: 600,
               color: T.text,
               whiteSpace: big ? "nowrap" : "normal",
@@ -4024,14 +4206,27 @@ const OverviewSectionHeader = ({ T, activeFilter, sectionOpen, onToggle, section
         {subtitle && (
           <div style={{ fontSize: 13.5, color: T.textMuted, fontWeight: 500, marginTop: 3 }}>{subtitle}</div>
         )}
-      </div>
-    )}
+    </div>
     {extra}
   </div>
 );
 
-function OverviewTab({ T, derived, vehicles, bookings, teams, onVehiclePress, user }) {
-  const firstName = user?.full_name?.trim().split(" ")[0] || "there";
+function OverviewTab({ T, derived, vehicles, bookings, teams, onVehiclePress, overviewTrack }) {
+  // Page-wide Workshop / Body Shop / Combined scope (the topbar dropdown,
+  // owned by OwnerDashboard so it can also drive the topbar itself) — every
+  // number on this tab now reflects this, not just Vehicle Journey. Reuses
+  // the exact real classification AdvisorDashboard already relies on
+  // (tag_workshop at intake, advisor.role once claimed — see
+  // overviewIsWorkshopAdvisor/overviewIsBodyshopAdvisor above).
+  const trackVehicles = useMemo(() => {
+    if (overviewTrack === "combined") return vehicles;
+    return vehicles.filter(overviewTrack === "bodyshop" ? overviewIsBodyshopAdvisor : overviewIsWorkshopAdvisor);
+  }, [vehicles, overviewTrack]);
+
+  // Same predicates the page-level `derived` above uses, just scoped to
+  // trackVehicles instead of the full fleet — recomputed locally rather
+  // than threading a track param through the shared `derived` (which other
+  // tabs also consume unscoped).
   const {
     activeVehicles,
     todayEntriesVehicles,
@@ -4039,97 +4234,39 @@ function OverviewTab({ T, derived, vehicles, bookings, teams, onVehiclePress, us
     complaintVehicles,
     stuckVehicles,
     todayCompleted,
-  } = derived;
+  } = useMemo(() => {
+    const istToday = todayISTDateStr();
+    // "completed" is the only real exit — a vehicle still eats a parking spot
+    // right up until then, so ready_for_exit (billed/ready, just not yet
+    // physically driven out) still counts as On Premises, not skipped.
+    const active = trackVehicles.filter((v) => v.current_stage !== "completed");
+    const todayEntries = trackVehicles.filter((v) => v.entry_time && istDateStr(v.entry_time) === istToday);
+    const nowTs = new Date();
+    return {
+      activeVehicles: active,
+      todayEntriesVehicles: todayEntries,
+      overdue: active.filter((v) => v.expected_completion_time && nowTs > new Date(toZ(v.expected_completion_time))),
+      complaintVehicles: active.filter((v) => v.customer_complaints && v.customer_complaints.length > 0),
+      stuckVehicles: active.filter((v) => {
+        if (v.current_stage !== "pending") return false;
+        const ws = v.work_stages?.[0];
+        if (!ws) return true;
+        return !DEPT_KEYS.some((k) => ws[`${k}_status`] === "in_progress" || ws[`${k}_status`] === "on_hold");
+      }),
+      todayCompleted: trackVehicles.filter((v) => {
+        if (v.current_stage !== "completed") return false;
+        const raw = v.updated_at || v.entry_time;
+        return !!raw && istDateStr(raw) === istToday;
+      }),
+    };
+  }, [trackVehicles]);
 
   // { type: "stat"|"flow"|"dept"|"advisor"|"team", key, label } | null
   const [activeFilter, setActiveFilter] = useState(null);
   const [sectionOpen, setSectionOpen] = useState(OVERVIEW_SECTION_OPEN_ALL);
   const [bookingDayIdx, setBookingDayIdx] = useState(1); // 0=yesterday,1=today,2=tomorrow,3=day after
-  const [journeyMode, setJourneyMode] = useState("workshop"); // workshop | bodyshop
   const [deptHistory, setDeptHistory] = useState(null);
   const [deptHistoryLoading, setDeptHistoryLoading] = useState(false);
-  // { vehicleId, stageKey, top, left, pinned } | null — a single shared popover
-  // instance for EVERY dot in the timeline (not just Workshop), positioned in JS
-  // from the triggering dot's real bounding rect and clamped to the viewport,
-  // rather than a per-row CSS-anchored popup that can clip off-screen.
-  const [popover, setPopover] = useState(null);
-  const popoverRef = useRef(null);
-  // Mirrors popover.pinned into a ref so the hover handler can read it without
-  // needing `popover` in its own dependency list — keeping the handler
-  // referentially stable (see handleDotHover/Leave/Click below).
-  const pinnedRef = useRef(false);
-  useEffect(() => {
-    pinnedRef.current = !!popover?.pinned;
-  }, [popover?.pinned]);
-
-  useEffect(() => {
-    if (!popover?.pinned) return;
-    const onDocClick = (e) => {
-      if (popoverRef.current && !popoverRef.current.contains(e.target)) {
-        setPopover(null);
-      }
-    };
-    document.addEventListener("mousedown", onDocClick);
-    return () => document.removeEventListener("mousedown", onDocClick);
-  }, [popover?.pinned]);
-
-  // Which vehicle's department row is expanded (click-to-open, not hover) —
-  // a single id, not per-row local state, so opening one automatically closes
-  // whichever other row was open (only one expanded row at a time), and only
-  // the 2 affected rows re-render via memo's prop diff, not the whole table.
-  const [expandedDeptVehicleId, setExpandedDeptVehicleId] = useState(null);
-  const handleDeptClusterClick = useCallback((vehicleId) => {
-    setExpandedDeptVehicleId((prev) => (prev === vehicleId ? null : vehicleId));
-  }, []);
-  useEffect(() => {
-    if (!expandedDeptVehicleId) return;
-    // Closes on any click that isn't inside a cluster (clicking a DIFFERENT
-    // row's cluster doesn't hit this branch — that row's own onClick just
-    // replaces expandedDeptVehicleId directly) or inside the open panel itself.
-    const onDocClick = (e) => {
-      if (!e.target.closest?.(".ov-dept-cluster") && !e.target.closest?.(".ov-dept-expand-panel")) {
-        setExpandedDeptVehicleId(null);
-      }
-    };
-    document.addEventListener("mousedown", onDocClick);
-    return () => document.removeEventListener("mousedown", onDocClick);
-  }, [expandedDeptVehicleId]);
-
-  // Stable (useCallback([])) so table rows can be wrapped in React.memo and
-  // actually skip re-rendering when the popover opens/closes on hover —
-  // otherwise every mouse-move over the table forced the entire (50+ row)
-  // table to re-render, which is what made hovering feel laggy.
-  const handleDotHover = useCallback((e, vehicleId, stageKey, isDept = false) => {
-    if (pinnedRef.current) return;
-    // Individual department dots now show the full detail card on hover
-    // (team/times/work list), so they need the popover's real footprint to
-    // clamp correctly — the old flat 220x56 estimate was sized for the
-    // one-line flow-stage tooltip only.
-    const [w, h] =
-      isDept && stageKey === OVERVIEW_ALL_DEPTS_KEY
-        ? [OVERVIEW_TOOLTIP_W, 210]
-        : isDept
-          ? [250, 230]
-          : [OVERVIEW_TOOLTIP_W, OVERVIEW_TOOLTIP_H];
-    const { top, left } = computeOverviewPopoverPos(e, w, h);
-    setPopover({ vehicleId, stageKey, isDept, top, left, pinned: false });
-  }, []);
-  const handleDotLeave = useCallback(() => {
-    setPopover((prev) => (prev?.pinned ? prev : null));
-  }, []);
-  const handleDotClick = useCallback((e, vehicleId, stageKey, isDept = false) => {
-    // Compute the position synchronously, here, from the real event — not
-    // inside the setState updater below. React can re-invoke a functional
-    // updater later (e.g. Strict Mode's purity check), by which point the
-    // synthetic event's currentTarget has already reverted to null, so
-    // reading the DOM inside the updater crashes intermittently on click.
-    const { top, left } = computeOverviewPopoverPos(e);
-    setPopover((prev) => {
-      if (prev?.pinned && prev.vehicleId === vehicleId && prev.stageKey === stageKey) return null;
-      return { vehicleId, stageKey, isDept, top, left, pinned: true };
-    });
-  }, []);
-
   // Load department start/end timestamps from vehicle_history once, eagerly —
   // Workshop Departments (Row 3) needs real completion dates to know which
   // "completed" vehicles finished today vs. days ago, and the per-department
@@ -4218,7 +4355,7 @@ function OverviewTab({ T, derived, vehicles, bookings, teams, onVehiclePress, us
         Object.entries(OVERVIEW_DEPT_DETAILS_SOURCE).map(([deptKey, src]) =>
           supabase
             .from(src.table)
-            .select(`vehicle_id, ${src.workField}, notes`)
+            .select(`vehicle_id, ${src.workField}, notes${OVERVIEW_DEPTS_WITH_HOLD_REASON.has(deptKey) ? ", hold_reason" : ""}`)
             .in("vehicle_id", ids)
             .then(({ data, error }) => {
               if (error) throw error;
@@ -4232,7 +4369,7 @@ function OverviewTab({ T, derived, vehicles, bookings, teams, onVehiclePress, us
         results.forEach(({ deptKey, workField, rows }) => {
           rows.forEach((row) => {
             if (!map[row.vehicle_id]) map[row.vehicle_id] = {};
-            map[row.vehicle_id][deptKey] = { workItems: row[workField] || [], notes: row.notes || null };
+            map[row.vehicle_id][deptKey] = { workItems: row[workField] || [], notes: row.notes || null, holdReason: row.hold_reason || null };
           });
         });
         setDeptDetails(map);
@@ -4287,19 +4424,21 @@ function OverviewTab({ T, derived, vehicles, bookings, teams, onVehiclePress, us
       });
   }, [workAssignedHistory, vehicles]);
 
-  const setFilter = (type_, key, label, section) => {
+  // The drawer is now a slide-in overlay (matching the design mockup),
+  // not an inline column that shrinks the rest of the page — so opening a
+  // filter no longer needs to collapse other sections to make room. The
+  // page underneath stays exactly as it was; the drawer just floats over
+  // it, closed by the scrim or the ✕.
+  const setFilter = (type_, key, label) => {
     setActiveFilter((prev) => {
       const same = prev && prev.type === type_ && prev.key === key;
-      setSectionOpen(same ? OVERVIEW_SECTION_OPEN_ALL : overviewOpenOnly(section));
       return same ? null : { type: type_, key, label };
     });
   };
   const clearFilter = () => {
     setActiveFilter(null);
-    setSectionOpen(OVERVIEW_SECTION_OPEN_ALL);
   };
   const toggleSection = (section) => {
-    if (!activeFilter) return;
     setSectionOpen((s) => ({ ...s, [section]: !s[section] }));
   };
 
@@ -4320,8 +4459,67 @@ function OverviewTab({ T, derived, vehicles, bookings, teams, onVehiclePress, us
     return activeVehicles.filter((v) => v.expected_completion_time && istDateStr(v.expected_completion_time) <= today);
   }, [activeVehicles]);
 
+  // "On Hold" / "Spare Part Not Available" — split from the same real
+  // signal (work_stages.<dept>_status === 'on_hold'), same real precedent
+  // as tata-motors-mobile's owner.js "On Hold" tag: a vehicle whose hold
+  // reason (on ANY on-hold dept) is spare_not_available counts only in
+  // Spare Part Not Available, never also in On Hold — everything else that's
+  // on hold (any other reason, or no reason recorded for three_m/washing)
+  // counts in On Hold. Needs deptDetails loaded (hold_reason lives there).
+  const { onHoldVehicles, sparePartVehicles } = useMemo(() => {
+    const onHold = [];
+    const spare = [];
+    if (!deptDetails) return { onHoldVehicles: onHold, sparePartVehicles: spare };
+    activeVehicles.forEach((v) => {
+      const ws = v.work_stages?.[0];
+      if (!ws) return;
+      let hasSpare = false;
+      let hasOtherHold = false;
+      DEPT_KEYS.forEach((k) => {
+        if (ws[`${k}_status`] !== "on_hold") return;
+        if (deptDetails[v.id]?.[k]?.holdReason === OVERVIEW_SPARE_PART_HOLD_REASON) hasSpare = true;
+        else hasOtherHold = true;
+      });
+      if (hasSpare) spare.push(v);
+      else if (hasOtherHold) onHold.push(v);
+    });
+    return { onHoldVehicles: onHold, sparePartVehicles: spare };
+  }, [activeVehicles, deptDetails]);
+
+  // Workshop Vehicles (On Premises) age split — Today / <7 Days / >=7 Days,
+  // same 3-way bucket as the design mockup, computed off the real entry_time.
+  const onPremisesSplits = useMemo(() => {
+    const todaySet = new Set(todayEntriesVehicles.map((v) => v.id));
+    let today = 0, under7 = 0, over7 = 0;
+    activeVehicles.forEach((v) => {
+      if (todaySet.has(v.id)) { today += 1; return; }
+      if (!v.entry_time) { under7 += 1; return; }
+      const days = (Date.now() - new Date(toZ(v.entry_time)).getTime()) / 86400000;
+      if (days < 7) under7 += 1; else over7 += 1;
+    });
+    return { today, under7, over7 };
+  }, [activeVehicles, todayEntriesVehicles]);
+
+  // Arrived Today — Pending (still here) / Completed (already handed over) /
+  // SDD% (same-day-delivery rate among today's arrivals).
+  const arrivedTodaySplits = useMemo(() => {
+    const total = todayEntriesVehicles.length;
+    const completed = todayEntriesVehicles.filter((v) => v.current_stage === "completed").length;
+    const pending = total - completed;
+    return { pending, completed, sdd: total ? Math.round((completed / total) * 100) : 0 };
+  }, [todayEntriesVehicles]);
+
+  // Expected Deliveries — Today's Delivery (also entered today, fast
+  // turnaround) / Pending Deliveries (entered on an earlier day, now due).
+  const expectedDeliverySplits = useMemo(() => {
+    const todaySet = new Set(todayEntriesVehicles.map((v) => v.id));
+    let today = 0, pending = 0;
+    expectedTodayVehicles.forEach((v) => (todaySet.has(v.id) ? (today += 1) : (pending += 1)));
+    return { today, pending };
+  }, [expectedTodayVehicles, todayEntriesVehicles]);
+
   const filteredVehicles = useMemo(() => {
-    let result = vehicles;
+    let result = trackVehicles;
     if (activeFilter) {
       const { type: ftype, key } = activeFilter;
       if (ftype === "stat") {
@@ -4333,6 +4531,8 @@ function OverviewTab({ T, derived, vehicles, bookings, teams, onVehiclePress, us
         else if (key === "warranty") result = warrantyVehicles;
         else if (key === "expectedToday") result = expectedTodayVehicles;
         else if (key === "exitToday") result = todayCompleted;
+        else if (key === "onHold") result = onHoldVehicles;
+        else if (key === "sparePart") result = sparePartVehicles;
       } else if (ftype === "flow") {
         if (key === "cashier") result = vehicles.filter(isAwaitingCashier);
         else if (key === "advisor")
@@ -4348,7 +4548,7 @@ function OverviewTab({ T, derived, vehicles, bookings, teams, onVehiclePress, us
         // dept work finished days ago (but hasn't moved out of the system yet)
         // no longer belongs to that department's active list.
         const today = todayISTDateStr();
-        result = vehicles.filter((v) => {
+        result = trackVehicles.filter((v) => {
           const state = getOverviewDeptState(v, key);
           if (state === "not_assigned") return false;
           if (state !== "completed") return true;
@@ -4356,10 +4556,10 @@ function OverviewTab({ T, derived, vehicles, bookings, teams, onVehiclePress, us
           return !!end && istDateStr(end) === today;
         });
       } else if (ftype === "advisor") {
-        result = vehicles.filter((v) => v.advisor?.full_name === key);
+        result = trackVehicles.filter((v) => v.advisor?.full_name === key);
       } else if (ftype === "team") {
         const team = (teams || []).find((t) => t.id === key);
-        result = team ? vehicles.filter((v) => v.work_stages?.[0]?.[`${team.role}_team_id`] === team.id) : [];
+        result = team ? trackVehicles.filter((v) => v.work_stages?.[0]?.[`${team.role}_team_id`] === team.id) : [];
       }
     }
     result = [...result].sort((a, b) => {
@@ -4371,6 +4571,7 @@ function OverviewTab({ T, derived, vehicles, bookings, teams, onVehiclePress, us
   }, [
     activeFilter,
     vehicles,
+    trackVehicles,
     activeVehicles,
     todayEntriesVehicles,
     overdue,
@@ -4379,20 +4580,39 @@ function OverviewTab({ T, derived, vehicles, bookings, teams, onVehiclePress, us
     warrantyVehicles,
     expectedTodayVehicles,
     todayCompleted,
+    onHoldVehicles,
+    sparePartVehicles,
     teams,
     sortDir,
     deptHistory,
   ]);
 
-  const popoverVehicle = popover ? vehicles.find((v) => v.id === popover.vehicleId) : null;
-
-  // Top row: the two "big picture" numbers, each spanning the width of two
-  // ordinary cards. Bottom row: the four "needs a closer look" numbers.
+  // Top row: the three "big picture" numbers, each with its own sub-split
+  // breakdown. Bottom row: the six "needs a closer look" numbers.
+  // Explicit 2-line break (not left to natural wrap) so all 3 hero cards
+  // keep the same uniform label shape regardless of how much width each
+  // card happens to get. filterLabel stays a plain string — it flows into
+  // activeFilter.label, which the drawer title/exports render as text, so
+  // it can't be the <br />-bearing JSX the card itself displays.
   const heroStatDefs = [
-    ["On Premises", "active", activeVehicles.length],
-    ["Expected Deliveries", "expectedToday", expectedTodayVehicles.length],
+    [<>On<br />Premises</>, "active", activeVehicles.length, [
+      { label: "Today", value: onPremisesSplits.today },
+      { label: "<7 Days", value: onPremisesSplits.under7 },
+      { label: ">7 Days", value: onPremisesSplits.over7 },
+    ], "On Premises"],
+    [<>Arrived<br />Today</>, "today", todayEntriesVehicles.length, [
+      { label: "Pending", value: arrivedTodaySplits.pending },
+      { label: "Completed", value: arrivedTodaySplits.completed },
+      { label: "SDD", value: arrivedTodaySplits.sdd + "%" },
+    ], "Arrived Today"],
+    [<>Expected<br />Deliveries</>, "expectedToday", expectedTodayVehicles.length, [
+      { label: "Today's Delivery", value: expectedDeliverySplits.today },
+      { label: "Pending Deliveries", value: expectedDeliverySplits.pending },
+    ], "Expected Deliveries"],
   ];
   const statDefs = [
+    ["On Hold", "onHold", onHoldVehicles.length],
+    ["Spare Part Not Available", "sparePart", sparePartVehicles.length],
     ["Overdue Vehicles", "overdue", overdue.length],
     ["Vehicle Complaints", "complaint", complaintVehicles.length],
     ["Idle Vehicles", "stuck", stuckVehicles.length],
@@ -4447,60 +4667,22 @@ function OverviewTab({ T, derived, vehicles, bookings, teams, onVehiclePress, us
   return (
     <div style={{ display: "flex", gap: 28, alignItems: "flex-start" }}>
       <style>{FLOW_PULSE_KEYFRAMES}</style>
-      <style>{OVERVIEW_DEPT_HOVER_CSS}</style>
-      <div style={{ flex: activeFilter ? "0.8 1 0" : "1 1 100%", minWidth: 0 }}>
+      <div style={{ flex: "1 1 100%", minWidth: 0 }}>
         {/* SECTION: Today's Snapshot & Bookings */}
+        {/* Greeting now lives in the topbar title (see OwnerDashboard's
+            render, tab === "overview") — "Scheduled Bookings" + its day
+            switcher now live inside the bookings box itself (BookingsRingPanel's
+            own head), matching the design mockup, not up here as a
+            page-level header row. */}
         <OverviewSectionHeader
           T={T}
-          activeFilter={activeFilter}
-          sectionOpen={sectionOpen}
-          onToggle={toggleSection}
           section="snapshot"
-          big
-          title={
-            <>
-              Hey {firstName} 👋
-              <span style={{ fontSize: 18, fontWeight: 500, color: T.textMuted }}>
-                , here's what's happening in your workshop today!
-              </span>
-            </>
-          }
-          extra={
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                width: activeFilter ? "100%" : 380,
-                marginLeft: activeFilter ? 0 : "auto",
-              }}
-            >
-              <span style={{ fontSize: 18, fontWeight: 500, color: T.text }}>Scheduled Bookings</span>
-              <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                <span
-                  onClick={() => setBookingDayIdx((i) => Math.max(0, i - 1))}
-                  style={{ cursor: "pointer", color: T.accent, fontWeight: 700, fontSize: 15, padding: "2px 4px" }}
-                >
-                  ‹
-                </span>
-                <span style={{ fontSize: 13, fontWeight: 700, color: T.text, minWidth: 60, textAlign: "center" }}>
-                  {BOOKING_DAY_OFFSETS[bookingDayIdx].label}
-                </span>
-                <span
-                  onClick={() => setBookingDayIdx((i) => Math.min(BOOKING_DAY_OFFSETS.length - 1, i + 1))}
-                  style={{ cursor: "pointer", color: T.accent, fontWeight: 700, fontSize: 15, padding: "2px 4px" }}
-                >
-                  ›
-                </span>
-              </div>
-            </div>
-          }
         />
         {sectionOpen.snapshot && (
           <div
             style={{
               display: "flex",
-              flexDirection: activeFilter ? "column" : "row",
+              flexDirection: "row",
               flexWrap: "nowrap",
               alignItems: "stretch",
               gap: 20,
@@ -4513,38 +4695,40 @@ function OverviewTab({ T, derived, vehicles, bookings, teams, onVehiclePress, us
               style={{
                 flex: "1 1 auto",
                 minWidth: 0,
-                width: activeFilter ? "100%" : "auto",
+                width: "auto",
                 display: "flex",
                 flexDirection: "column",
                 gap: 10,
               }}
             >
-              {/* Top row: 2 hero cards, each the width of 2 ordinary cards
-                  below — a 2-column grid at the same total row width does
-                  that automatically, no explicit column-span needed. */}
+              {/* Top row: 3 hero cards (On Premises / Arrived Today /
+                  Expected Deliveries), each with its own sub-split
+                  breakdown underneath the headline number. */}
               <div
                 style={{
                   display: "grid",
-                  gridTemplateColumns: activeFilter ? "1fr" : "repeat(2,1fr)",
-                  gap: 10,
+                  gridTemplateColumns: "repeat(3,1fr)",
+                  gap: 12,
+                  marginBottom: 12,
                 }}
               >
-                {heroStatDefs.map(([label, key, value]) => (
+                {heroStatDefs.map(([label, key, value, splits, filterLabel]) => (
                   <FilterCard
                     key={key}
                     T={T}
                     label={label}
                     value={value}
+                    splits={splits}
                     active={activeFilter?.type === "stat" && activeFilter.key === key}
-                    onClick={() => setFilter("stat", key, label, "snapshot")}
+                    onClick={() => setFilter("stat", key, filterLabel)}
                   />
                 ))}
               </div>
               <div
                 style={{
                   display: "grid",
-                  gridTemplateColumns: activeFilter ? "repeat(2,minmax(0,1fr))" : "repeat(4,1fr)",
-                  gap: 10,
+                  gridTemplateColumns: "repeat(6,1fr)",
+                  gap: 8,
                 }}
               >
                 {statDefs.map(([label, key, value]) => (
@@ -4553,22 +4737,21 @@ function OverviewTab({ T, derived, vehicles, bookings, teams, onVehiclePress, us
                     T={T}
                     label={label}
                     value={value}
+                    compact
                     danger={OVERVIEW_ALARM_STAT_KEYS.has(key)}
                     active={activeFilter?.type === "stat" && activeFilter.key === key}
-                    onClick={() => setFilter("stat", key, label, "snapshot")}
+                    onClick={() => setFilter("stat", key, label)}
                   />
                 ))}
               </div>
             </div>
 
-            {/* Bookings — "Bookings" label moved up into the section header
-                above (same row as "Hey Dhruv"), so this box is a plain flex
-                sibling of the glance-card grid with nothing pushing its top
-                edge down — with the row's alignItems:"stretch", it now starts
-                and ends exactly level with the glance cards beside it. */}
+            {/* Bookings box — "Scheduled Bookings" + its day switcher are
+                BookingsRingPanel's own head row now, matching the mockup
+                (inside the bordered box, not a page-level header). */}
             <div
               style={{
-                width: activeFilter ? "100%" : 380,
+                width: 340,
                 flexShrink: 0,
                 background: T.surface,
                 border: `1px solid ${T.border}`,
@@ -4579,12 +4762,20 @@ function OverviewTab({ T, derived, vehicles, bookings, teams, onVehiclePress, us
                 justifyContent: "center",
               }}
             >
-              <BookingsRingPanel T={T} bookings={bookings} compact={!!activeFilter} dayIdx={bookingDayIdx} />
+              <BookingsRingPanel
+                T={T}
+                bookings={bookings}
+                dayIdx={bookingDayIdx}
+                onDayChange={setBookingDayIdx}
+              />
             </div>
           </div>
         )}
 
-        {/* SECTION: Vehicle Journey */}
+        {/* SECTION: Vehicle Journey — the Workshop/Body Shop pill that used
+            to live here is gone; the topbar dropdown now scopes the whole
+            tab, this included. Combined shows both lanes stacked with their
+            own sub-label, matching the design mockup's own combined view. */}
         <OverviewSectionHeader
           T={T}
           activeFilter={activeFilter}
@@ -4592,138 +4783,165 @@ function OverviewTab({ T, derived, vehicles, bookings, teams, onVehiclePress, us
           onToggle={toggleSection}
           section="journey"
           title="Vehicle Journey"
-          extra={
-            <>
-              <div
-                onClick={(e) => e.stopPropagation()}
-                style={{
-                  display: "flex",
-                  border: `1px solid ${T.border}`,
-                  borderRadius: 12,
-                  overflow: "hidden",
-                  marginLeft: "auto",
-                  alignSelf: "center",
-                }}
-              >
-                {[
-                  ["workshop", "Workshop"],
-                  ["bodyshop", "Body Shop"],
-                ].map(([m, label]) => (
-                  <div
-                    key={m}
-                    onClick={() => setJourneyMode(m)}
-                    style={{
-                      padding: "3px 9px",
-                      fontSize: 10.5,
-                      fontWeight: 700,
-                      cursor: "pointer",
-                      whiteSpace: "nowrap",
-                      background: journeyMode === m ? T.text : T.surface,
-                      color: journeyMode === m ? T.accentBg : T.textSecondary,
-                    }}
-                  >
-                    {label}
-                  </div>
-                ))}
-              </div>
-            </>
-          }
         />
         {sectionOpen.journey && (
-          <VehicleJourneyTracker
-            T={T}
-            vehicles={vehicles}
-            activeFilter={activeFilter}
-            mode={journeyMode}
-            onSelect={(ftype, key, label) => setFilter(ftype, key, label, "journey")}
-          />
+          overviewTrack === "combined" ? (
+            <>
+              <div style={{ fontFamily: FONT_HEADING, fontSize: 14, fontWeight: 600, color: T.text, marginBottom: 8 }}>
+                Workshop Track
+              </div>
+              <VehicleJourneyTracker
+                T={T}
+                vehicles={vehicles.filter(overviewIsWorkshopAdvisor)}
+                activeFilter={activeFilter}
+                mode="workshop"
+                onSelect={(ftype, key, label) => setFilter(ftype, key, label, "journey")}
+              />
+              <div style={{ fontFamily: FONT_HEADING, fontSize: 14, fontWeight: 600, color: T.text, margin: "14px 0 8px" }}>
+                Body Shop Track
+              </div>
+              <VehicleJourneyTracker
+                T={T}
+                vehicles={vehicles.filter(overviewIsBodyshopAdvisor)}
+                activeFilter={activeFilter}
+                mode="bodyshop"
+                onSelect={(ftype, key, label) => setFilter(ftype, key, label, "journey")}
+              />
+            </>
+          ) : (
+            <VehicleJourneyTracker
+              T={T}
+              vehicles={trackVehicles}
+              activeFilter={activeFilter}
+              mode={overviewTrack}
+              onSelect={(ftype, key, label) => setFilter(ftype, key, label, "journey")}
+            />
+          )
         )}
 
-        {/* SECTION: Workshop Departments */}
-        <OverviewSectionHeader
-          T={T}
-          activeFilter={activeFilter}
-          sectionOpen={sectionOpen}
-          onToggle={toggleSection}
-          section="departments"
-          title="Workshop Load"
-        />
-        {sectionOpen.departments && (
-          <ParallelCluster
-            T={T}
-            vehicles={vehicles}
-            activeFilter={activeFilter}
-            deptHistory={deptHistory}
-            workAssignedHistory={workAssignedHistory}
-            onSelect={(key) => {
-              const label = OVERVIEW_WORKSHOP_DEPTS.find((d) => d.key === key)?.label || key;
-              setFilter("dept", key, label, "departments");
-            }}
-          />
-        )}
+        {/* SECTION: Workshop Load + Advisor & Team Workload, side by side —
+            same 2-column split the design mockup uses, not stacked one
+            above the other. Single column once a drawer is open, matching
+            every other section's own activeFilter-narrows-to-1-col rule. */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 26 }}>
+          <div>
+            <OverviewSectionHeader
+              T={T}
+              activeFilter={activeFilter}
+              sectionOpen={sectionOpen}
+              onToggle={toggleSection}
+              section="departments"
+              title="Workshop Load"
+            />
+            {sectionOpen.departments && (
+              <ParallelCluster
+                T={T}
+                vehicles={trackVehicles}
+                activeFilter={activeFilter}
+                deptHistory={deptHistory}
+                workAssignedHistory={workAssignedHistory}
+                onSelect={(key) => {
+                  const label = OVERVIEW_WORKSHOP_DEPTS.find((d) => d.key === key)?.label || key;
+                  setFilter("dept", key, label, "departments");
+                }}
+              />
+            )}
+          </div>
 
-        {/* SECTION: Advisor & Team Workload */}
-        <OverviewSectionHeader
-          T={T}
-          activeFilter={activeFilter}
-          sectionOpen={sectionOpen}
-          onToggle={toggleSection}
-          section="workload"
-          kicker
-          title="Staff Workload"
-        />
-        {sectionOpen.workload && (
-          <AdvisorTeamWorkload
-            T={T}
-            vehicles={vehicles}
-            teams={teams || []}
-            activeFilter={activeFilter}
-            onSelectAdvisor={(name) => setFilter("advisor", name, name, "workload")}
-            onSelectTeam={(t) => setFilter("team", t.id, `${t.name} (${TEAM_ROLE_LABELS[t.role] || t.role})`, "workload")}
-          />
-        )}
+          <div>
+            {/* No "Staff Workload" wrapper heading — the design mockup has
+                two independent section-label headings instead ("Advisor
+                Workload" / "Team Workload", one right above each table),
+                rendered inside AdvisorTeamWorkload itself. This header call
+                stays only for the activeFilter collapse-chevron affordance
+                other sections also get. */}
+            <OverviewSectionHeader
+              T={T}
+              activeFilter={activeFilter}
+              sectionOpen={sectionOpen}
+              onToggle={toggleSection}
+              section="workload"
+            />
+            {sectionOpen.workload && (
+              <AdvisorTeamWorkload
+                T={T}
+                vehicles={trackVehicles}
+                teams={teams || []}
+                activeFilter={activeFilter}
+                overviewTrack={overviewTrack}
+                onSelectAdvisor={(name) => setFilter("advisor", name, name, "workload")}
+                onSelectTeam={(t) => setFilter("team", t.id, `${t.name} (${TEAM_ROLE_LABELS[t.role] || t.role})`, "workload")}
+              />
+            )}
+          </div>
+        </div>
       </div>
 
-      {/* DRAWER */}
+      {/* DRAWER — a slide-in overlay over the whole page (matching the
+          design mockup's .drawer/.scrim), not an inline column that
+          shrinks the rest of Overview. Scrim click closes it, same as the
+          ✕. */}
       {activeFilter && (
-        <div style={{ flex: "2.6 1 0", minWidth: 0, borderLeft: `1px solid ${T.border}`, padding: "22px 30px 30px" }}>
-          <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12, marginBottom: 4 }}>
-            <div style={{ fontFamily: FONT_HEADING, fontSize: 19, fontWeight: 600, color: T.text }}>
-              {isAdvisorFilter || isTeamFilter ? activeFilter.label : "Vehicles on Premises"}
+        <>
+          <div
+            onClick={clearFilter}
+            style={{ position: "fixed", inset: 0, background: "rgba(22,31,56,0.5)", zIndex: 50 }}
+          />
+          <div
+            style={{
+              position: "fixed",
+              top: 0,
+              right: 0,
+              bottom: 0,
+              width: "min(560px, 92vw)",
+              background: T.surface,
+              borderLeft: `1px solid ${T.border}`,
+              boxShadow: T.shadowLg,
+              zIndex: 51,
+              display: "flex",
+              flexDirection: "column",
+            }}
+          >
+            <div style={{ padding: "20px 24px 14px", borderBottom: `1px solid ${T.border}`, flexShrink: 0 }}>
+              <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10 }}>
+                <div style={{ fontFamily: FONT_HEADING, fontSize: 19, fontWeight: 600, color: T.text }}>
+                  {isAdvisorFilter || isTeamFilter ? activeFilter.label : "Vehicles on Premises"}
+                </div>
+                <div
+                  onClick={clearFilter}
+                  title="Close"
+                  style={{
+                    width: 30,
+                    height: 30,
+                    borderRadius: "50%",
+                    border: `1px solid ${T.border}`,
+                    background: T.surface,
+                    color: T.textSecondary,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    fontSize: 14,
+                    fontWeight: 700,
+                    cursor: "pointer",
+                    flexShrink: 0,
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.background = T.redLight;
+                    e.currentTarget.style.color = T.red;
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = T.surface;
+                    e.currentTarget.style.color = T.textSecondary;
+                  }}
+                >
+                  ✕
+                </div>
+              </div>
+              <div style={{ fontSize: 12.5, color: T.textMuted, fontWeight: 600, marginTop: 4 }}>
+                filtered by <b style={{ color: T.accent }}>{activeFilter.label}</b> · {filteredVehicles.length} vehicle(s)
+              </div>
             </div>
-            <div
-              onClick={clearFilter}
-              title="Close"
-              style={{
-                width: 30,
-                height: 30,
-                borderRadius: "50%",
-                border: `1px solid ${T.border}`,
-                background: T.surface,
-                color: T.textSecondary,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                fontSize: 14,
-                fontWeight: 700,
-                cursor: "pointer",
-                flexShrink: 0,
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.background = T.surfaceElevated;
-                e.currentTarget.style.color = T.red;
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background = T.surface;
-                e.currentTarget.style.color = T.textSecondary;
-              }}
-            >
-              ✕
-            </div>
-          </div>
-          <div style={{ fontSize: 13.5, color: T.textMuted, fontWeight: 600, marginBottom: 16 }}>
-            filtered by <b style={{ color: T.accent }}>{activeFilter.label}</b> · {filteredVehicles.length} vehicle(s)
-          </div>
+            <div style={{ flex: 1, overflowY: "auto", padding: "14px 24px 30px" }}>
 
           {isDeptFilter && (
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 18 }}>
@@ -4786,82 +5004,19 @@ function OverviewTab({ T, derived, vehicles, bookings, teams, onVehiclePress, us
             )}
           </div>
 
-          <OverviewLegend T={T} />
-
-          {/* Table — CSS grid of divs matching the mock exactly (it never uses
-              a real <table>); the whole drawer scrolls as one column, only
-              this grid gets horizontal scroll below the 680px min-width. */}
-          <div style={{ overflowX: "auto" }}>
-            <div style={{ minWidth: 680 }}>
-              <div
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: OVERVIEW_TABLE_GRID_COLS,
-                  columnGap: 14,
-                  padding: "0 0 11px",
-                  borderBottom: `2px solid ${T.text}`,
-                }}
-              >
-                {["Vehicle", "Customer", "Advisor", "Journey Stage", "Departments", "Entry", "Exp. Exit"].map((label) => (
-                  <div
-                    key={label}
-                    style={{ fontSize: 12, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "1px" }}
-                  >
-                    {label}
-                  </div>
-                ))}
-              </div>
-              {filteredVehicles.length === 0 && (
-                <div style={{ padding: "40px 0", textAlign: "center", color: T.textMuted, fontSize: 14 }}>
-                  No vehicles match this filter right now.
-                </div>
-              )}
-              {filteredVehicles.map((v) => (
-                <OverviewVehicleRow
-                  key={v.id}
-                  T={T}
-                  v={v}
-                  teams={teams}
-                  deptHistory={deptHistory}
-                  onVehiclePress={onVehiclePress}
-                  onDotHover={handleDotHover}
-                  onDotLeave={handleDotLeave}
-                  onDotClick={handleDotClick}
-                  isDeptExpanded={expandedDeptVehicleId === v.id}
-                  onToggleDeptExpand={handleDeptClusterClick}
-                />
-              ))}
+          {/* List — the design mock's flat .veh-row cards, one per vehicle,
+              no header row and no table (the mock never uses one here). */}
+          {filteredVehicles.length === 0 && (
+            <div style={{ padding: "40px 0", textAlign: "center", color: T.textMuted, fontSize: 14 }}>
+              No vehicles match this filter right now.
+            </div>
+          )}
+          {filteredVehicles.map((v) => (
+            <OverviewVehicleRow key={v.id} T={T} v={v} activeFilter={activeFilter} deptDetails={deptDetails} onVehiclePress={onVehiclePress} />
+          ))}
             </div>
           </div>
-        </div>
-      )}
-
-      {popover && popoverVehicle && (
-        <div ref={popoverRef} style={{ position: "fixed", top: popover.top, left: popover.left, zIndex: 200 }}>
-          {popover.pinned ? (
-            <StagePreviewPopover
-              T={T}
-              vehicle={popoverVehicle}
-              stageKey={popover.stageKey}
-              isDept={popover.isDept}
-              deptHistory={deptHistory}
-              deptDetails={deptDetails}
-              workAssignedHistory={workAssignedHistory}
-              teams={teams}
-            />
-          ) : (
-            <QuickStageTooltip
-              T={T}
-              vehicle={popoverVehicle}
-              stageKey={popover.stageKey}
-              isDept={popover.isDept}
-              deptHistory={deptHistory}
-              deptDetails={deptDetails}
-              workAssignedHistory={workAssignedHistory}
-              teams={teams}
-            />
-          )}
-        </div>
+        </>
       )}
     </div>
   );
@@ -15592,6 +15747,12 @@ function OwnerDashboard({ user, onLogout }) {
   });
   const [reportLoading, setReportLoading] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
+  // Workshop / Body Shop / Combined — page-wide scope for the whole
+  // Overview tab (was a small pill next to Vehicle Journey only; now the
+  // topbar dropdown from the design mockup, driving every section). Must
+  // live here, above every early return below, per Rules of Hooks.
+  const [overviewTrack, setOverviewTrack] = useState("workshop");
+  const [overviewTrackMenuOpen, setOverviewTrackMenuOpen] = useState(false);
 
   // Sidebar badge for the Follow-ups tab — a handful of head:true/count-only
   // queries (cheap, no rows pulled) so the badge is accurate even before the
@@ -16080,6 +16241,13 @@ function OwnerDashboard({ user, onLogout }) {
       </div>
     );
 
+  // Same greeting Overview used to render as its own full-width 30px banner
+  // inside the tab body — moved up into the topbar title instead (matching
+  // the design mockup's "greeting replaces the tab name" topbar), so
+  // Overview no longer repeats "Hey Dhruv" twice on the page.
+  const topbarFirstName = user?.full_name?.trim().split(" ")[0] || "there";
+  const OVERVIEW_TRACK_LABELS = { workshop: "Workshop", bodyshop: "Body Shop", combined: "Combined" };
+
   // CHANGE 4: Bookings tab added with todayBookingsPending alert
   const TABS = [
     {
@@ -16326,8 +16494,17 @@ function OwnerDashboard({ user, onLogout }) {
             >
               AutoFlow
             </div>
-            <div style={{ fontSize: 22, fontWeight: 600, color: T.text, fontFamily: FONT_HEADING }}>
-              {TABS.find((t) => t.key === tab)?.label}
+            <div style={{ fontSize: tab === "overview" ? 19 : 22, fontWeight: 600, color: T.text, fontFamily: FONT_HEADING }}>
+              {tab === "overview" ? (
+                <>
+                  Good morning, {topbarFirstName} 👋
+                  <span style={{ fontSize: 15, fontWeight: 500, color: T.textMuted }}>
+                    {" "}— here's what's happening in your workshop today!
+                  </span>
+                </>
+              ) : (
+                TABS.find((t) => t.key === tab)?.label
+              )}
             </div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -16354,6 +16531,71 @@ function OwnerDashboard({ user, onLogout }) {
                 LIVE
               </span>
             </div>
+            {tab === "overview" && (
+              <div style={{ position: "relative" }}>
+                <button
+                  onClick={() => setOverviewTrackMenuOpen((o) => !o)}
+                  style={{
+                    padding: "9px 13px",
+                    borderRadius: 10,
+                    border: `1px solid ${T.border}`,
+                    background: T.surfaceElevated,
+                    cursor: "pointer",
+                    fontSize: 13,
+                    fontWeight: 700,
+                    color: T.text,
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                  }}
+                >
+                  🔀 {OVERVIEW_TRACK_LABELS[overviewTrack]} ▾
+                </button>
+                {overviewTrackMenuOpen && (
+                  <>
+                    {/* Click-outside catcher, same pattern used elsewhere in
+                        this file for dismissible menus/popovers. */}
+                    <div
+                      onClick={() => setOverviewTrackMenuOpen(false)}
+                      style={{ position: "fixed", inset: 0, zIndex: 59 }}
+                    />
+                    <div
+                      style={{
+                        position: "absolute",
+                        top: "calc(100% + 6px)",
+                        right: 0,
+                        background: T.surface,
+                        border: `1px solid ${T.border}`,
+                        borderRadius: 10,
+                        boxShadow: T.shadowMd,
+                        overflow: "hidden",
+                        zIndex: 60,
+                        minWidth: 200,
+                      }}
+                    >
+                      {["workshop", "bodyshop", "combined"].map((k) => (
+                        <div
+                          key={k}
+                          onClick={() => {
+                            setOverviewTrack(k);
+                            setOverviewTrackMenuOpen(false);
+                          }}
+                          style={{
+                            padding: "10px 14px",
+                            fontSize: 13,
+                            cursor: "pointer",
+                            color: overviewTrack === k ? T.accent : T.text,
+                            background: overviewTrack === k ? T.accentBg : "transparent",
+                          }}
+                        >
+                          {OVERVIEW_TRACK_LABELS[k]}
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
             <button
               onClick={toggleDark}
               style={{
@@ -16419,6 +16661,7 @@ function OwnerDashboard({ user, onLogout }) {
               teams={teams}
               onVehiclePress={setSelVehicle}
               user={user}
+              overviewTrack={overviewTrack}
             />
           )}
           {tab === "floor" && (
