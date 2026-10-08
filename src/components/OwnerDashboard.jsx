@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useCallback, useRef, memo, Fragment } fro
 import { supabase } from "../lib/supabase";
 import logo from "../assets/logo.png";
 import * as XLSX from "xlsx";
+import ExcelJS from "exceljs";
 import QRCode from "qrcode";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
@@ -13528,6 +13529,1038 @@ const ATT_BOARD_COLS = "1.2fr .9fr 1fr .9fr .9fr .9fr .7fr 1fr";
 const ATT_LEAVE_COLS = "1.1fr .8fr .8fr .8fr .5fr 1.4fr .8fr 1.2fr .9fr";
 const ATT_PUNCH_LOG_COLS = "1fr .8fr .8fr 1.2fr 1fr 1fr";
 
+// ── Attendance monthly report (all employees) ────────────────────────────────
+// Rules + holidays live in config_options (categories attendance_rule /
+// attendance_holiday) so no schema change is needed.
+const ATT_DEFAULT_RULES = {
+  late: "09:45",
+  early: "18:00",
+  halfDayHrs: 4,
+  weeklyOff: [0],
+};
+const ATT_WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const attIstDate = (iso) =>
+  new Date(toZ(iso)).toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+const attIstHM = (iso) =>
+  new Date(toZ(iso)).toLocaleTimeString("en-GB", {
+    timeZone: "Asia/Kolkata",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+const attFmtMins = (m) => {
+  const t = Math.round(m);
+  return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, "0")}`;
+};
+const attDatesBetween = (from, to) => {
+  const out = [];
+  let d = new Date(from + "T00:00:00Z");
+  const end = new Date(to + "T00:00:00Z");
+  while (d <= end && out.length < 93) {
+    out.push(d.toISOString().slice(0, 10));
+    d = new Date(d.getTime() + 86400000);
+  }
+  return out;
+};
+const attEsc = (s) =>
+  String(s ?? "").replace(
+    /[&<>"]/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c],
+  );
+
+function buildAttendanceReport({ users, logs, leaves, holidays, rules, from, to }) {
+  const dates = attDatesBetween(from, to);
+  const today = new Date().toLocaleDateString("en-CA", {
+    timeZone: "Asia/Kolkata",
+  });
+  const logMap = {};
+  logs.forEach((l) => {
+    const d = attIstDate(l.punch_time);
+    const k = l.user_id + "|" + d;
+    (logMap[k] = logMap[k] || []).push(l);
+  });
+  const onLeave = (uid, d) =>
+    leaves.some((l) => l.user_id === uid && l.from_date <= d && l.to_date >= d);
+
+  const sorted = [...users].sort(
+    (a, b) =>
+      (ROLE_LABELS[a.role] || a.role || "").localeCompare(
+        ROLE_LABELS[b.role] || b.role || "",
+      ) || (a.full_name || "").localeCompare(b.full_name || ""),
+  );
+
+  const employees = sorted.map((u, i) => {
+    const stats = { P: 0, HP: 0, A: 0, WO: 0, H: 0, L: 0, late: 0, early: 0, missOut: 0, mins: 0 };
+    const days = dates.map((date) => {
+      const wd = new Date(date + "T00:00:00Z").getUTCDay();
+      const punches = (logMap[u.id + "|" + date] || []).sort(
+        (a, b) => new Date(toZ(a.punch_time)) - new Date(toZ(b.punch_time)),
+      );
+      const d = { date, status: "", inT: "", outT: "", mins: 0, late: false, early: false };
+      if (punches.length) {
+        let lastIn = null;
+        punches.forEach((p) => {
+          if (p.type === "in") lastIn = new Date(toZ(p.punch_time));
+          else if (p.type === "out" && lastIn) {
+            d.mins += (new Date(toZ(p.punch_time)) - lastIn) / 60000;
+            lastIn = null;
+          }
+        });
+        const firstIn = punches.find((p) => p.type === "in");
+        const outs = punches.filter((p) => p.type === "out");
+        const lastOut = outs[outs.length - 1];
+        if (firstIn) {
+          d.inT = attIstHM(firstIn.punch_time);
+          d.late = d.inT > rules.late;
+        }
+        if (lastOut) {
+          d.outT = attIstHM(lastOut.punch_time);
+          d.early = d.outT < rules.early;
+        } else if (date !== today) {
+          stats.missOut++;
+        }
+        if (d.mins > 0 && d.mins < rules.halfDayHrs * 60) {
+          d.status = "½P";
+          stats.HP++;
+        } else {
+          d.status = "P";
+          stats.P++;
+        }
+        if (d.late) stats.late++;
+        if (d.early) stats.early++;
+        stats.mins += d.mins;
+      } else if (date > today) {
+        d.status = "";
+      } else if (holidays[date]) {
+        d.status = "H";
+        stats.H++;
+      } else if (rules.weeklyOff.includes(wd)) {
+        d.status = "WO";
+        stats.WO++;
+      } else if (onLeave(u.id, date)) {
+        d.status = "L";
+        stats.L++;
+      } else {
+        d.status = "A";
+        stats.A++;
+      }
+      return d;
+    });
+    return {
+      user: u,
+      code: i + 1,
+      dept: ROLE_LABELS[u.role] || u.role || "—",
+      days,
+      stats,
+    };
+  });
+  return { dates, employees };
+}
+
+function attDayLabel(date) {
+  const wd = new Date(date + "T00:00:00Z").getUTCDay();
+  return `${parseInt(date.slice(8), 10)} ${ATT_WEEKDAYS[wd].slice(0, 2)}`;
+}
+
+// ─── Professional, styled .xlsx export — uses ExcelJS (not the plain `xlsx`
+// package used everywhere else in this file), since real fonts/fills/
+// borders/freeze-panes need a styling-capable writer and SheetJS's free
+// tier has none. Deliberately scoped to this one export only — every other
+// XLSX.* export in this file is untouched.
+const ATT_NAVY = "FF161F38";
+const ATT_GOLD = "FFC9781F";
+const ATT_GOLD_LIGHT = "FFFAF1DE";
+const ATT_GREEN = "FF1FA15E";
+const ATT_RED = "FFA4452F";
+const ATT_GRAY = "FF7C7461";
+const ATT_BORDER = "FFD9D2C2";
+const ATT_BAND = "FFFBF8F0";
+
+const attThinBorder = { style: "thin", color: { argb: ATT_BORDER } };
+const attAllBorders = { top: attThinBorder, left: attThinBorder, bottom: attThinBorder, right: attThinBorder };
+
+function attStatusColor(status) {
+  if (status === "P") return ATT_GREEN;
+  if (status === "A") return ATT_RED;
+  if (status === "H") return "FF2563EB";
+  if (status === "L") return "FF6B4A8A";
+  if (status === "WO" || status === "½P") return ATT_GRAY;
+  return undefined;
+}
+
+function attAddLetterhead(ws, { title, subtitle, from, to, rules, holidaysInRange, colSpan }) {
+  ws.mergeCells(1, 1, 1, colSpan);
+  const t1 = ws.getCell(1, 1);
+  t1.value = "Sheetal Automobiles";
+  t1.font = { name: "Calibri", size: 16, bold: true, color: { argb: ATT_NAVY } };
+  ws.getRow(1).height = 24;
+
+  ws.mergeCells(2, 1, 2, colSpan);
+  const t2 = ws.getCell(2, 1);
+  t2.value = title;
+  t2.font = { name: "Calibri", size: 12, bold: true, color: { argb: ATT_GOLD } };
+
+  ws.mergeCells(3, 1, 3, colSpan);
+  const t3 = ws.getCell(3, 1);
+  const fmt = (d) => new Date(d + "T00:00:00").toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+  t3.value = `Period: ${fmt(from)} – ${fmt(to)}   |   Generated: ${new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}`;
+  t3.font = { name: "Calibri", size: 9, color: { argb: ATT_GRAY } };
+
+  ws.mergeCells(4, 1, 4, colSpan);
+  const t4 = ws.getCell(4, 1);
+  t4.value = `Late after ${rules.late}  ·  Early before ${rules.early}  ·  Half-day under ${rules.halfDayHrs}h  ·  Weekly off: ${rules.weeklyOff.map((d) => ATT_WEEKDAYS[d]).join(", ") || "none"}  ·  Holidays in period: ${holidaysInRange}`;
+  t4.font = { name: "Calibri", size: 9, italic: true, color: { argb: ATT_GRAY } };
+
+  if (subtitle) {
+    ws.mergeCells(5, 1, 5, colSpan);
+    ws.getCell(5, 1).value = subtitle;
+    ws.getCell(5, 1).font = { name: "Calibri", size: 9, color: { argb: ATT_GRAY } };
+  }
+}
+
+function attStyleHeaderRow(row) {
+  row.eachCell((cell) => {
+    cell.font = { name: "Calibri", size: 9.5, bold: true, color: { argb: "FFFFFFFF" } };
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: ATT_NAVY } };
+    cell.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
+    cell.border = attAllBorders;
+  });
+  row.height = 26;
+}
+
+async function exportAttendanceReportXLSX({ report, rules, holidays, from, to }) {
+  const { dates, employees } = report;
+  const holidaysInRangeList = Object.entries(holidays).filter(([d]) => d >= from && d <= to);
+  const holidaysInRange = holidaysInRangeList.length;
+
+  const wb = new ExcelJS.Workbook();
+  wb.creator = "Sheetal Automobiles";
+  wb.created = new Date();
+
+  // ── Sheet 1: Summary — the one sheet most owners actually open ──────────
+  const sumHeaders = [
+    "Code", "Employee", "Department", "Present", "Half Day", "Absent", "Weekly Off",
+    "Holiday", "Leave", "Late", "Early", "No Out Punch", "Total Hours",
+  ];
+  const ws1 = wb.addWorksheet("Summary", { views: [{ state: "frozen", ySplit: 7 }] });
+  ws1.columns = sumHeaders.map((h, i) => ({
+    width: i === 1 ? 24 : i === 2 ? 16 : h === "Total Hours" ? 12 : 10,
+  }));
+  attAddLetterhead(ws1, {
+    title: "All-Staff Attendance Summary",
+    subtitle: `${employees.length} staff · ${dates.length} day${dates.length === 1 ? "" : "s"} in period`,
+    from, to, rules, holidaysInRange, colSpan: sumHeaders.length,
+  });
+  ws1.addRow([]);
+  attStyleHeaderRow(ws1.addRow(sumHeaders));
+
+  const totals = { P: 0, HP: 0, A: 0, WO: 0, H: 0, L: 0, late: 0, early: 0, missOut: 0, mins: 0 };
+  employees.forEach((e, i) => {
+    const s = e.stats;
+    Object.keys(totals).forEach((k) => (totals[k] += s[k]));
+    const row = ws1.addRow([
+      e.code, e.user.full_name || "", e.dept, s.P, s.HP, s.A, s.WO, s.H, s.L, s.late, s.early, s.missOut, attFmtMins(s.mins),
+    ]);
+    row.eachCell((cell, col) => {
+      cell.border = attAllBorders;
+      cell.alignment = { vertical: "middle", horizontal: col <= 3 ? "left" : "center" };
+      cell.font = { name: "Calibri", size: 10 };
+      if (i % 2 === 1) cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: ATT_BAND } };
+    });
+    if (s.A > 0) row.getCell(6).font = { name: "Calibri", size: 10, bold: true, color: { argb: ATT_RED } };
+    if (s.late > 0) row.getCell(10).font = { name: "Calibri", size: 10, bold: true, color: { argb: ATT_GOLD } };
+    if (s.early > 0) row.getCell(11).font = { name: "Calibri", size: 10, bold: true, color: { argb: ATT_GOLD } };
+  });
+  const totalsRow = ws1.addRow([
+    "", "TOTAL", "", totals.P, totals.HP, totals.A, totals.WO, totals.H, totals.L,
+    totals.late, totals.early, totals.missOut, attFmtMins(totals.mins),
+  ]);
+  totalsRow.eachCell((cell) => {
+    cell.font = { name: "Calibri", size: 10, bold: true, color: { argb: ATT_NAVY } };
+    cell.border = { top: { style: "double", color: { argb: ATT_NAVY } }, bottom: attThinBorder };
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: ATT_GOLD_LIGHT } };
+  });
+
+  // ── Sheet 2: Daily Detail — the full per-employee day grid ──────────────
+  const sumHdr = ["P", "½P", "A", "WO", "H", "L", "Late", "Early", "Hours"];
+  const detailCols = 1 + dates.length + sumHdr.length;
+  const ws2 = wb.addWorksheet("Daily Detail", { views: [{ state: "frozen", xSplit: 1, ySplit: 8 }] });
+  ws2.columns = [
+    { width: 11 },
+    ...dates.map(() => ({ width: 6 })),
+    ...sumHdr.map(() => ({ width: 6 })),
+  ];
+  attAddLetterhead(ws2, {
+    title: "Daily Attendance Detail (Basic Work Duration)",
+    subtitle: "P = Present · ½P = Half Day · A = Absent · WO = Weekly Off · H = Holiday · L = Leave · gold = late-in/early-out",
+    from, to, rules, holidaysInRange, colSpan: detailCols,
+  });
+  ws2.addRow([]);
+  attStyleHeaderRow(ws2.addRow(["Days", ...dates.map(attDayLabel), ...sumHdr]));
+
+  let curDept = null;
+  employees.forEach((e) => {
+    if (e.dept !== curDept) {
+      curDept = e.dept;
+      const r = ws2.addRow([`Department: ${curDept}`]);
+      ws2.mergeCells(r.number, 1, r.number, detailCols);
+      r.getCell(1).font = { name: "Calibri", size: 10, bold: true, color: { argb: "FFFFFFFF" } };
+      r.getCell(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: ATT_GOLD } };
+      r.height = 18;
+    }
+    const nameRow = ws2.addRow([`${e.code}. ${e.user.full_name || ""}`]);
+    ws2.mergeCells(nameRow.number, 1, nameRow.number, detailCols);
+    nameRow.getCell(1).font = { name: "Calibri", size: 10, bold: true, color: { argb: ATT_NAVY } };
+    nameRow.getCell(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: ATT_BAND } };
+
+    const sumVals = (s) => [s.P, s.HP, s.A, s.WO, s.H, s.L, s.late, s.early, attFmtMins(s.mins)];
+    const statusRow = ws2.addRow(["Status", ...e.days.map((d) => d.status), ...sumVals(e.stats)]);
+    const inRow = ws2.addRow(["In", ...e.days.map((d) => (d.inT ? d.inT + (d.late ? "*" : "") : ""))]);
+    const outRow = ws2.addRow(["Out", ...e.days.map((d) => (d.outT ? d.outT + (d.early ? "*" : "") : ""))]);
+    const totRow = ws2.addRow(["Total", ...e.days.map((d) => (d.status === "" ? "" : d.mins ? attFmtMins(d.mins) : "00:00"))]);
+
+    [statusRow, inRow, outRow, totRow].forEach((row) => {
+      row.eachCell((cell) => {
+        cell.font = { name: "Calibri", size: 8.5 };
+        cell.alignment = { horizontal: "center" };
+        cell.border = { bottom: attThinBorder };
+      });
+      row.getCell(1).font = { name: "Calibri", size: 8.5, bold: true, color: { argb: ATT_GRAY } };
+      row.getCell(1).alignment = { horizontal: "left" };
+    });
+    e.days.forEach((d, i) => {
+      const color = attStatusColor(d.status);
+      if (color) statusRow.getCell(2 + i).font = { name: "Calibri", size: 8.5, bold: true, color: { argb: color } };
+      if (d.late) inRow.getCell(2 + i).font = { name: "Calibri", size: 8.5, bold: true, color: { argb: ATT_GOLD } };
+      if (d.early) outRow.getCell(2 + i).font = { name: "Calibri", size: 8.5, bold: true, color: { argb: ATT_GOLD } };
+    });
+  });
+
+  // ── Sheet 3: Holidays ────────────────────────────────────────────────────
+  const ws3 = wb.addWorksheet("Holidays", { views: [{ state: "frozen", ySplit: 6 }] });
+  ws3.columns = [{ width: 14 }, { width: 12 }, { width: 32 }];
+  attAddLetterhead(ws3, {
+    title: "Declared Holidays in Period",
+    from, to, rules, holidaysInRange, colSpan: 3,
+  });
+  ws3.addRow([]);
+  attStyleHeaderRow(ws3.addRow(["Date", "Day", "Occasion"]));
+  holidaysInRangeList
+    .sort(([a], [b]) => (a < b ? -1 : 1))
+    .forEach(([d, n], i) => {
+      const dow = ATT_WEEKDAYS[new Date(d + "T00:00:00Z").getUTCDay()];
+      const row = ws3.addRow([d, dow, n]);
+      row.eachCell((cell) => {
+        cell.border = attAllBorders;
+        cell.font = { name: "Calibri", size: 10 };
+        if (i % 2 === 1) cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: ATT_BAND } };
+      });
+    });
+  if (holidaysInRangeList.length === 0) {
+    const row = ws3.addRow(["—", "—", "No holidays declared in this period"]);
+    row.eachCell((cell) => {
+      cell.border = attAllBorders;
+      cell.font = { name: "Calibri", size: 10, italic: true, color: { argb: ATT_GRAY } };
+    });
+  }
+
+  const buf = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `attendance_all_staff_${from}_to_${to}.xlsx`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function printAttendanceReport({ report, rules, holidays, from, to }) {
+  const { dates, employees } = report;
+  const printed = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
+  const hols = Object.entries(holidays)
+    .filter(([d]) => d >= from && d <= to)
+    .sort()
+    .map(([d, n]) => `${d} (${attEsc(n)})`)
+    .join(", ");
+  const summary = employees
+    .map(
+      (e) => `<tr><td>${e.code}</td><td style="text-align:left">${attEsc(e.user.full_name)}</td><td style="text-align:left">${attEsc(e.dept)}</td>
+      <td>${e.stats.P}</td><td>${e.stats.HP}</td><td>${e.stats.A}</td><td>${e.stats.WO}</td><td>${e.stats.H}</td><td>${e.stats.L}</td>
+      <td>${e.stats.late}</td><td>${e.stats.early}</td><td>${e.stats.missOut}</td><td>${attFmtMins(e.stats.mins)}</td></tr>`,
+    )
+    .join("");
+  const head = dates.map((d) => `<th>${attDayLabel(d).replace(" ", "<br>")}</th>`).join("");
+  const detail = employees
+    .map(
+      (e) => `<div class="emp"><b>${e.code}. ${attEsc(e.user.full_name)}</b> — ${attEsc(e.dept)}
+      &nbsp; P ${e.stats.P} · ½P ${e.stats.HP} · A ${e.stats.A} · Late ${e.stats.late} · Early ${e.stats.early} · ${attFmtMins(e.stats.mins)} h
+      <table class="g"><tr><th></th>${head}</tr>
+      <tr><td>Status</td>${e.days.map((d) => `<td class="s${d.status === "A" ? " a" : ""}">${d.status}</td>`).join("")}</tr>
+      <tr><td>In</td>${e.days.map((d) => `<td${d.late ? ' class="f"' : ""}>${d.inT}</td>`).join("")}</tr>
+      <tr><td>Out</td>${e.days.map((d) => `<td${d.early ? ' class="f"' : ""}>${d.outT}</td>`).join("")}</tr>
+      <tr><td>Total</td>${e.days.map((d) => `<td>${d.mins ? attFmtMins(d.mins) : ""}</td>`).join("")}</tr></table></div>`,
+    )
+    .join("");
+  const win = window.open("", "_blank");
+  if (!win) {
+    alert("Pop-up blocked — allow pop-ups to print the report.");
+    return;
+  }
+  win.document.write(`<html><head><title>Attendance Report ${from} to ${to}</title><style>
+    @page { size: A4 landscape; margin: 10mm; }
+    body { font-family: sans-serif; font-size: 11px; color: #0f172a; }
+    h1 { font-size: 18px; margin: 0 0 4px; } .m { color: #475569; margin: 2px 0; }
+    table { border-collapse: collapse; width: 100%; margin: 8px 0; }
+    th, td { border: 1px solid #94a3b8; padding: 3px 5px; text-align: center; }
+    th { background: #e2e8f0; }
+    table.g { font-size: 7.5px; } table.g td, table.g th { padding: 1px 2px; }
+    .s { font-weight: 700; } .a { color: #dc2626; } .f { color: #dc2626; font-weight: 700; }
+    .emp { page-break-inside: avoid; margin-bottom: 8px; }
+    .sig { display: flex; justify-content: space-between; margin-top: 50px; }
+    .sig div { width: 28%; border-top: 1px solid #0f172a; padding-top: 4px; text-align: center; }
+    .pb { page-break-before: always; }
+  </style></head><body onload="window.print()">
+    <h1>Sheetal Automobiles — Monthly Attendance Report</h1>
+    <div class="m">Period: <b>${from}</b> to <b>${to}</b> &nbsp;|&nbsp; Printed: ${printed}</div>
+    <div class="m">Late check-in after <b>${rules.late}</b> · Early checkout before <b>${rules.early}</b> · ½P if worked under <b>${rules.halfDayHrs}h</b> · Weekly off: ${rules.weeklyOff.map((d) => ATT_WEEKDAYS[d]).join(", ") || "none"}</div>
+    <div class="m">Holidays: ${hols || "none"}</div>
+    <table><tr><th>Code</th><th>Employee</th><th>Department</th><th>Present</th><th>½P</th><th>Absent</th><th>WO</th><th>Holiday</th><th>Leave</th><th>Late</th><th>Early</th><th>No Out</th><th>Hours</th></tr>${summary}</table>
+    <div class="sig"><div>Prepared by (Cashier)</div><div>Checked by (Accounts)</div><div>Approved by (Owner)</div></div>
+    <div class="pb"></div>
+    <h1>Day-wise Detail</h1>
+    <div class="m">Red In/Out = late check-in / early checkout</div>
+    ${detail}
+  </body></html>`);
+  win.document.close();
+}
+
+// ─── Holiday calendar — declare holidays by clicking days on a real month
+// grid instead of one date+name+Add-click per holiday. Click an empty day
+// to name and declare it, click a declared day to remove it; a "Print"
+// button in the footer prints the currently-viewed year's full list.
+const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MONTH_LABELS = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
+function dateKey(year, month, day) {
+  return `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function printHolidayList(holidays, year) {
+  const rows = Object.entries(holidays)
+    .filter(([d]) => d.startsWith(String(year)))
+    .sort(([a], [b]) => (a < b ? -1 : 1));
+  const body = rows
+    .map(([d, n]) => {
+      const dt = new Date(d + "T00:00:00");
+      return `<tr><td>${d}</td><td>${DOW_LABELS[dt.getDay()]}</td><td>${n}</td></tr>`;
+    })
+    .join("");
+  const win = window.open("", "_blank");
+  if (!win) return;
+  win.document.write(`<html><head><title>Holidays ${year}</title>
+    <style>
+      body{font-family:sans-serif;padding:24px;color:#161f38}
+      h1{font-size:20px;margin-bottom:4px}
+      .m{color:#666;font-size:12px;margin-bottom:16px}
+      table{border-collapse:collapse;width:100%;max-width:480px}
+      th,td{border:1px solid #ccc;padding:6px 10px;font-size:13px;text-align:left}
+      th{background:#f3f3f3}
+    </style></head><body>
+    <h1>Declared Holidays — ${year}</h1>
+    <div class="m">${rows.length} holiday${rows.length === 1 ? "" : "s"} declared</div>
+    <table><tr><th>Date</th><th>Day</th><th>Occasion</th></tr>${
+      body || '<tr><td colspan="3">No holidays declared</td></tr>'
+    }</table>
+  </body></html>`);
+  win.document.close();
+  win.focus();
+  win.print();
+}
+
+function HolidayCalendarModal({ T, holidays, onAdd, onRemove, onClose }) {
+  const today = new Date();
+  const [viewYear, setViewYear] = useState(today.getFullYear());
+  const [viewMonth, setViewMonth] = useState(today.getMonth());
+
+  const firstDow = new Date(viewYear, viewMonth, 1).getDay();
+  const daysInMonth = new Date(viewYear, viewMonth + 1, 0).getDate();
+  const cells = [];
+  for (let i = 0; i < firstDow; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+
+  const goMonth = (delta) => {
+    let m = viewMonth + delta;
+    let y = viewYear;
+    if (m < 0) {
+      m = 11;
+      y -= 1;
+    } else if (m > 11) {
+      m = 0;
+      y += 1;
+    }
+    setViewMonth(m);
+    setViewYear(y);
+  };
+
+  const handleDayClick = (day) => {
+    const key = dateKey(viewYear, viewMonth, day);
+    if (holidays[key]) {
+      onRemove(key);
+    } else {
+      const name = window.prompt(`Holiday name for ${key}:`, "");
+      if (name && name.trim()) onAdd(key, name.trim());
+    }
+  };
+
+  const todayKey = dateKey(today.getFullYear(), today.getMonth(), today.getDate());
+  const yearCount = Object.keys(holidays).filter((d) => d.startsWith(String(viewYear))).length;
+
+  return (
+    <>
+      <div
+        onClick={onClose}
+        style={{ position: "fixed", inset: 0, background: "rgba(22,31,56,0.5)", zIndex: 60 }}
+      />
+      <div
+        style={{
+          position: "fixed",
+          top: "50%",
+          left: "50%",
+          transform: "translate(-50%,-50%)",
+          width: "min(560px, 94vw)",
+          maxHeight: "90vh",
+          overflowY: "auto",
+          background: T.surface,
+          border: `1px solid ${T.border}`,
+          borderRadius: 12,
+          boxShadow: T.shadowLg,
+          zIndex: 61,
+          padding: "20px 22px",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+          <div style={{ fontFamily: FONT_HEADING, fontSize: 18, fontWeight: 600, color: T.text }}>
+            Declare Holidays
+          </div>
+          <div
+            onClick={onClose}
+            title="Close"
+            style={{ cursor: "pointer", color: T.textSecondary, fontSize: 22, lineHeight: 1, padding: 4 }}
+          >
+            ×
+          </div>
+        </div>
+
+        <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 14 }}>
+          Click an empty day to name and declare it a holiday. Click a declared day to remove it.
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+          <Btn T={T} v="ghost" sz="sm" onClick={() => goMonth(-1)}>
+            ‹ Prev
+          </Btn>
+          <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>
+            {MONTH_LABELS[viewMonth]} {viewYear}
+          </div>
+          <Btn T={T} v="ghost" sz="sm" onClick={() => goMonth(1)}>
+            Next ›
+          </Btn>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4, marginBottom: 4 }}>
+          {DOW_LABELS.map((d) => (
+            <div
+              key={d}
+              style={{
+                textAlign: "center",
+                fontSize: 10,
+                fontWeight: 700,
+                color: T.textMuted,
+                textTransform: "uppercase",
+                padding: "2px 0",
+              }}
+            >
+              {d}
+            </div>
+          ))}
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4, marginBottom: 16 }}>
+          {cells.map((day, i) => {
+            if (day === null) return <div key={`b${i}`} />;
+            const key = dateKey(viewYear, viewMonth, day);
+            const holName = holidays[key];
+            const isToday = key === todayKey;
+            return (
+              <div
+                key={key}
+                onClick={() => handleDayClick(day)}
+                title={holName || "Click to declare a holiday"}
+                style={{
+                  minHeight: 54,
+                  borderRadius: 8,
+                  border: isToday ? `1.5px solid ${T.accent}` : `1px solid ${T.border}`,
+                  background: holName ? T.redLight : T.surfaceElevated,
+                  cursor: "pointer",
+                  padding: "4px 5px",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 2,
+                }}
+              >
+                <div style={{ fontSize: 11, fontWeight: 700, color: holName ? T.red : T.text }}>{day}</div>
+                {holName && (
+                  <div
+                    style={{
+                      fontSize: 9,
+                      color: T.red,
+                      lineHeight: 1.2,
+                      overflow: "hidden",
+                      display: "-webkit-box",
+                      WebkitLineClamp: 2,
+                      WebkitBoxOrient: "vertical",
+                    }}
+                  >
+                    {holName}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div style={{ fontSize: 12, color: T.textMuted }}>
+            {yearCount} holiday{yearCount === 1 ? "" : "s"} declared in {viewYear}
+          </div>
+          <Btn T={T} v="secondary" sz="sm" onClick={() => printHolidayList(holidays, viewYear)}>
+            🖨️ Print {viewYear} List
+          </Btn>
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ─── Weekly-off picker — a single compact dropdown instead of 7 spread-out
+// checkboxes, per explicit request ("dropdown checkbox saves space").
+function WeeklyOffPicker({ T, value, onChange }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e) => {
+      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+
+  const summary =
+    value.length === 0 ? "None" : value.length === 7 ? "Every day" : value.slice().sort().map((i) => ATT_WEEKDAYS[i]).join(", ");
+
+  return (
+    <div ref={ref} style={{ position: "relative" }}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          padding: "8px 10px",
+          border: `1px solid ${T.border}`,
+          borderRadius: 6,
+          fontSize: 13,
+          background: T.surface,
+          color: T.text,
+          fontFamily: "inherit",
+          cursor: "pointer",
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          minWidth: 160,
+          justifyContent: "space-between",
+        }}
+      >
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{summary}</span>
+        <span style={{ color: T.textMuted, fontSize: 10 }}>{open ? "▴" : "▾"}</span>
+      </button>
+      {open && (
+        <div
+          style={{
+            position: "absolute",
+            top: "calc(100% + 4px)",
+            left: 0,
+            zIndex: 30,
+            background: T.surface,
+            border: `1px solid ${T.border}`,
+            borderRadius: 8,
+            boxShadow: T.shadowMd,
+            padding: 8,
+            minWidth: 160,
+          }}
+        >
+          {ATT_WEEKDAYS.map((n, i) => (
+            <label
+              key={n}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                fontSize: 13,
+                color: T.text,
+                cursor: "pointer",
+                padding: "5px 4px",
+                borderRadius: 4,
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={value.includes(i)}
+                onChange={(e) => onChange(e.target.checked ? [...value, i].sort() : value.filter((d) => d !== i))}
+              />
+              {n}
+            </label>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const attTodayStr = () => new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+
+// Month-start→today for the current month, full-month for any other offset —
+// matches what an owner actually means by "This Month" (to date) vs.
+// "Last Month" (the whole thing).
+function attMonthRange(offsetMonths) {
+  const today = attTodayStr();
+  const [y, m] = today.split("-").map(Number);
+  let tm = m - 1 + offsetMonths;
+  let ty = y;
+  while (tm < 0) {
+    tm += 12;
+    ty -= 1;
+  }
+  while (tm > 11) {
+    tm -= 12;
+    ty += 1;
+  }
+  const first = `${ty}-${String(tm + 1).padStart(2, "0")}-01`;
+  const lastDay = new Date(ty, tm + 1, 0).getDate();
+  const last = offsetMonths === 0 ? today : `${ty}-${String(tm + 1).padStart(2, "0")}-${String(lastDay).padStart(2, "0")}`;
+  return [first, last];
+}
+
+function AttendanceReportPanel({ T, users }) {
+  const [rules, setRules] = useState(ATT_DEFAULT_RULES);
+  const [holidays, setHolidays] = useState({});
+  const [showCalendar, setShowCalendar] = useState(false);
+  const [repFrom, setRepFrom] = useState(() => attMonthRange(0)[0]);
+  const [repTo, setRepTo] = useState(() => attMonthRange(0)[1]);
+  const [busy, setBusy] = useState("");
+  const [msg, setMsg] = useState("");
+
+  const loadSettings = useCallback(async () => {
+    const { data } = await supabase
+      .from("config_options")
+      .select("category,key,label")
+      .in("category", ["attendance_rule", "attendance_holiday"]);
+    const r = { ...ATT_DEFAULT_RULES };
+    const h = {};
+    (data || []).forEach((row) => {
+      if (row.category === "attendance_holiday") h[row.key] = row.label;
+      else if (row.key === "late_checkin") r.late = row.label;
+      else if (row.key === "early_checkout") r.early = row.label;
+      else if (row.key === "half_day_hours") r.halfDayHrs = parseFloat(row.label) || r.halfDayHrs;
+      else if (row.key === "weekly_off")
+        r.weeklyOff = row.label ? row.label.split(",").map(Number) : [];
+    });
+    setRules(r);
+    setHolidays(h);
+  }, []);
+  useEffect(() => {
+    loadSettings();
+  }, [loadSettings]);
+
+  const upsertRule = async (key, label) => {
+    const { data: ex } = await supabase
+      .from("config_options")
+      .select("id")
+      .eq("category", "attendance_rule")
+      .eq("key", key)
+      .maybeSingle();
+    const { error } = ex
+      ? await supabase.from("config_options").update({ label }).eq("id", ex.id)
+      : await supabase.from("config_options").insert([
+          { category: "attendance_rule", key, label, sort_order: 0, is_active: true },
+        ]);
+    if (error) throw error;
+  };
+
+  const saveRules = async () => {
+    setBusy("rules");
+    setMsg("");
+    try {
+      await upsertRule("late_checkin", rules.late);
+      await upsertRule("early_checkout", rules.early);
+      await upsertRule("half_day_hours", String(rules.halfDayHrs));
+      await upsertRule("weekly_off", rules.weeklyOff.join(","));
+      setMsg("Rules saved");
+    } catch (e) {
+      setMsg("Failed to save: " + e.message);
+    }
+    setBusy("");
+  };
+
+  const addHoliday = async (date, name) => {
+    setBusy("hol");
+    const { error } = await supabase.from("config_options").insert([
+      { category: "attendance_holiday", key: date, label: name, sort_order: 0, is_active: true },
+    ]);
+    if (error) setMsg("Failed to add holiday: " + error.message);
+    else await loadSettings();
+    setBusy("");
+  };
+
+  const removeHoliday = async (date) => {
+    const { error } = await supabase
+      .from("config_options")
+      .delete()
+      .eq("category", "attendance_holiday")
+      .eq("key", date);
+    if (error) setMsg("Failed to remove: " + error.message);
+    else await loadSettings();
+  };
+
+  const generate = async (kind) => {
+    if (!repFrom || !repTo || repFrom > repTo) {
+      setMsg("Pick a valid report period first");
+      return;
+    }
+    if (attDatesBetween(repFrom, repTo).length > 93) {
+      setMsg("Report period is too long — pick a range of 93 days or fewer");
+      return;
+    }
+    setBusy(kind);
+    setMsg("");
+    try {
+      const staff = users.filter((u) => u.is_active && u.role !== "owner");
+      // PostgREST caps responses at 1000 rows — page through the range.
+      let logs = [];
+      for (let i = 0; ; i += 1000) {
+        const { data, error } = await withTimeout(
+          supabase
+            .from("attendance_logs")
+            .select("user_id,type,punch_time")
+            .gte("punch_time", repFrom + "T00:00:00+05:30")
+            .lte("punch_time", repTo + "T23:59:59+05:30")
+            .order("punch_time", { ascending: true })
+            .order("id", { ascending: true })
+            .range(i, i + 999),
+          30000,
+        );
+        if (error) throw error;
+        logs = logs.concat(data || []);
+        if (!data || data.length < 1000) break;
+      }
+      const { data: leaves, error: lErr } = await withTimeout(
+        supabase
+          .from("leave_applications")
+          .select("user_id,from_date,to_date")
+          .eq("status", "approved")
+          .lte("from_date", repTo)
+          .gte("to_date", repFrom),
+        30000,
+      );
+      if (lErr) throw lErr;
+      const report = buildAttendanceReport({
+        users: staff, logs, leaves: leaves || [], holidays, rules, from: repFrom, to: repTo,
+      });
+      const args = { report, rules, holidays, from: repFrom, to: repTo };
+      if (kind === "xlsx") await exportAttendanceReportXLSX(args);
+      else printAttendanceReport(args);
+    } catch (e) {
+      setMsg("Report failed: " + e.message);
+    }
+    setBusy("");
+  };
+
+  const inp = {
+    padding: "8px 10px",
+    border: `1px solid ${T.border}`,
+    borderRadius: 6,
+    fontSize: 13,
+    background: T.surface,
+    color: T.text,
+    fontFamily: "inherit",
+  };
+  const lbl = {
+    display: "block",
+    fontSize: 11,
+    fontWeight: 700,
+    color: T.textSecondary,
+    marginBottom: 5,
+    textTransform: "uppercase",
+  };
+  const sectionHead = {
+    fontSize: 12,
+    fontWeight: 700,
+    color: T.accent,
+    textTransform: "uppercase",
+    letterSpacing: "0.04em",
+    marginBottom: 10,
+  };
+  const divider = { borderTop: `1px solid ${T.border}`, margin: "18px 0" };
+
+  const sortedHolidays = Object.entries(holidays).sort(([a], [b]) => (a < b ? -1 : 1));
+  const todayStr = attTodayStr();
+  const nextHoliday = sortedHolidays.find(([d]) => d >= todayStr);
+  const holidaysInPeriod = sortedHolidays.filter(([d]) => d >= repFrom && d <= repTo);
+
+  // 2 months ahead (declare a holiday before the month starts) through 23
+  // months back — a named-month dropdown instead of just This/Last Month,
+  // so any month is one click away, not just the two most recent.
+  const monthOptions = useMemo(() => {
+    const opts = [];
+    for (let off = 2; off >= -23; off--) {
+      const [f] = attMonthRange(off);
+      const [y, m] = f.split("-").map(Number);
+      opts.push({ off, label: new Date(y, m - 1, 1).toLocaleDateString("en-IN", { month: "long", year: "numeric" }) });
+    }
+    return opts;
+  }, []);
+  const selectedMonthOffset = monthOptions.find((o) => {
+    const [f, t] = attMonthRange(o.off);
+    return f === repFrom && t === repTo;
+  })?.off;
+  const selectMonth = (off) => {
+    const [f, t] = attMonthRange(off);
+    setRepFrom(f);
+    setRepTo(t);
+  };
+
+  return (
+    <Fragment>
+    <Bx T={T} style={{ marginBottom: 20 }}>
+      <SecTitle T={T}>All Staff Attendance Report</SecTitle>
+      <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 18 }}>
+        One Excel workbook or printable sheet, every employee, with a late / early / absent
+        summary and a full day-by-day grid.
+      </div>
+
+      <div style={sectionHead}>Report Period</div>
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end", marginBottom: 10 }}>
+        <div>
+          <label style={lbl}>Month</label>
+          <select
+            value={selectedMonthOffset ?? ""}
+            onChange={(e) => selectMonth(Number(e.target.value))}
+            style={{ ...inp, minWidth: 180 }}
+          >
+            <option value="" disabled>
+              Pick a month…
+            </option>
+            {monthOptions.map((o) => (
+              <option key={o.off} value={o.off}>
+                {o.label}
+                {o.off === 0 ? " (to date)" : ""}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div style={{ fontSize: 11, color: T.textMuted, paddingBottom: 9 }}>or custom range —</div>
+        <div>
+          <label style={lbl}>From</label>
+          <input type="date" value={repFrom} onChange={(e) => setRepFrom(e.target.value)} style={inp} />
+        </div>
+        <div>
+          <label style={lbl}>To</label>
+          <input type="date" value={repTo} onChange={(e) => setRepTo(e.target.value)} style={inp} />
+        </div>
+      </div>
+
+      <div style={divider} />
+
+      <div style={sectionHead}>Attendance Rules</div>
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end", marginBottom: 10 }}>
+        <div>
+          <label style={lbl}>Late check-in after</label>
+          <input type="time" value={rules.late} onChange={(e) => setRules({ ...rules, late: e.target.value })} style={inp} />
+        </div>
+        <div>
+          <label style={lbl}>Early checkout before</label>
+          <input type="time" value={rules.early} onChange={(e) => setRules({ ...rules, early: e.target.value })} style={inp} />
+        </div>
+        <div>
+          <label style={lbl}>Half day if under (hrs)</label>
+          <input
+            type="number" min="0" step="0.5" value={rules.halfDayHrs}
+            onChange={(e) => setRules({ ...rules, halfDayHrs: parseFloat(e.target.value) || 0 })}
+            style={{ ...inp, width: 90 }}
+          />
+        </div>
+        <div>
+          <label style={lbl}>Weekly off</label>
+          <WeeklyOffPicker T={T} value={rules.weeklyOff} onChange={(weeklyOff) => setRules({ ...rules, weeklyOff })} />
+        </div>
+        <Btn T={T} v="secondary" onClick={saveRules} disabled={busy === "rules"}>
+          {busy === "rules" ? "Saving..." : "Save Rules"}
+        </Btn>
+      </div>
+
+      <div style={divider} />
+
+      <div style={sectionHead}>Holidays</div>
+      <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "center", marginBottom: 10 }}>
+        <div style={{ fontSize: 13, color: T.text }}>
+          <b>{holidaysInPeriod.length}</b> in selected period
+          {holidaysInPeriod.length > 0 && (
+            <span style={{ color: T.textMuted }}>
+              {" "}
+              ({holidaysInPeriod.map(([d, n]) => `${d} ${n}`).join(", ")})
+            </span>
+          )}
+          <span style={{ color: T.textMuted }}> · {sortedHolidays.length} declared in total</span>
+          {nextHoliday && (
+            <span style={{ color: T.textMuted }}>
+              {" "}
+              · next upcoming: <b style={{ color: T.text }}>{nextHoliday[0]}</b> — {nextHoliday[1]}
+            </span>
+          )}
+        </div>
+        <Btn T={T} v="secondary" sz="sm" onClick={() => setShowCalendar(true)}>
+          📅 Open Holiday Calendar
+        </Btn>
+      </div>
+
+      <div style={divider} />
+
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+        <Btn T={T} v="primary" onClick={() => generate("xlsx")} disabled={!!busy}>
+          {busy === "xlsx" ? "Building..." : "⬇️ Export All Staff (Excel)"}
+        </Btn>
+        <Btn T={T} v="secondary" onClick={() => generate("print")} disabled={!!busy}>
+          {busy === "print" ? "Building..." : "🖨️ Print Report"}
+        </Btn>
+        {msg && <span style={{ fontSize: 12, color: T.textMuted }}>{msg}</span>}
+      </div>
+    </Bx>
+    {showCalendar && (
+      <HolidayCalendarModal
+        T={T}
+        holidays={holidays}
+        onAdd={addHoliday}
+        onRemove={removeHoliday}
+        onClose={() => setShowCalendar(false)}
+      />
+    )}
+    </Fragment>
+  );
+}
+
 function AttendanceTab({
   T,
   users,
@@ -14508,6 +15541,8 @@ function AttendanceTab({
               </Btn>
             </div>
           </Bx>
+
+          <AttendanceReportPanel T={T} users={users} />
 
           {histLogs.length > 0 &&
             (() => {
